@@ -1,5 +1,29 @@
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+*.egg-info/
 .venv/
+venv/
+
+# Tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build output
+build/
+dist/
+
+# Data downloaded or produced locally
+datasets/
 *.index.json
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,85 @@
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from searchengine import SpellingIndex, edit_distance, max_edits_auto
+
+
+def reference_distance(a: str, b: str) -> int:
+    """Textbook full-table Levenshtein, used to check the optimized version."""
+    table = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
+        table[i][0] = i
+    for j in range(len(b) + 1):
+        table[0][j] = j
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            cost = a[i - 1] != b[j - 1]
+            table[i][j] = min(table[i - 1][j] + 1, table[i][j - 1] + 1, table[i - 1][j - 1] + cost)
+    return table[-1][-1]
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "distance"),
+    [("kitten", "sitting", 3), ("same", "same", 0), ("", "abc", 3), ("flaw", "lawn", 2)],
+)
+def test_edit_distance(a, b, distance):
+    assert edit_distance(a, b, limit=10) == distance
+
+
+def test_edit_distance_stops_at_the_limit():
+    assert edit_distance("kitten", "sitting", limit=1) == 2  # "more than 1"
+    assert edit_distance("a", "abcdef", limit=2) == 3
+
+
+def test_edit_distance_rejects_negative_limit():
+    with pytest.raises(ValueError, match="limit"):
+        edit_distance("a", "b", limit=-1)
+
+
+@given(st.text(max_size=8), st.text(max_size=8), st.integers(min_value=0, max_value=4))
+def test_edit_distance_matches_reference(a, b, limit):
+    assert edit_distance(a, b, limit) == min(reference_distance(a, b), limit + 1)
+
+
+@pytest.mark.parametrize(("word", "edits"), [("ab", 0), ("abc", 1), ("abcde", 1), ("abcdef", 2)])
+def test_auto_fuzziness_matches_elasticsearch(word, edits):
+    assert max_edits_auto(word) == edits
+
+
+def make_spelling(*words: str) -> SpellingIndex:
+    spelling = SpellingIndex()
+    for word in words:
+        spelling.add(word)
+    return spelling
+
+
+def test_correct_finds_the_closest_word():
+    spelling = make_spelling("ranking", "rank", "elasticsearch")
+    assert spelling.correct("rankng") == "ranking"
+    assert spelling.correct("elastisearch") == "elasticsearch"
+
+
+def test_correct_leaves_known_short_and_hopeless_words_alone():
+    spelling = make_spelling("ranking")
+    assert spelling.correct("ranking") == "ranking"
+    assert spelling.correct("rk") == "rk"  # two letters: AUTO allows no edits
+    assert spelling.correct("zzzzzzzz") == "zzzzzzzz"
+
+
+def test_ties_go_to_the_more_common_word_then_alphabetical():
+    spelling = make_spelling("cart", "card", "card")
+    assert spelling.correct("carx") == "card"
+    assert make_spelling("cart", "card").correct("carx") == "card"
+
+
+def test_from_counts_round_trip():
+    spelling = SpellingIndex.from_counts({"search": 3, "engine": 1})
+    assert spelling.counts == {"search": 3, "engine": 1}
+    assert spelling.correct("serch") == "search"
+
+
+@pytest.mark.parametrize("counts", [{"word": 0}, {"word": "3"}])
+def test_from_counts_rejects_bad_entries(counts):
+    with pytest.raises(ValueError, match="invalid"):
+        SpellingIndex.from_counts(counts)

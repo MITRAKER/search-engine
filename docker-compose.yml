@@ -1,20 +1,21 @@
-# Starts a single-node Elasticsearch for local development (used from milestone 3).
-#   docker compose up -d
-#   curl http://localhost:9200
+# A single-node Elasticsearch for local development and the integration tests.
+#   docker compose up -d        start it
+#   curl localhost:9200          check it is up
+#   docker compose down -v      stop it and delete its data
 services:
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    image: elasticsearch:9.5.5
     environment:
-      - discovery.type=single-node      # no cluster, just one node
-      - xpack.security.enabled=false    # no passwords/TLS: local dev only!
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m  # cap memory so it runs on a laptop
+      - discovery.type=single-node      # one node, no cluster
+      - xpack.security.enabled=false    # no passwords or TLS: local development only!
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g      # cap memory so it runs on a laptop
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"           # reachable from this machine only
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
       interval: 10s
-      retries: 12
+      retries: 30
 volumes:
   esdata:

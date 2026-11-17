@@ -1,0 +1,27 @@
+# Dependabot opens a pull request when a dependency or a GitHub Action has a
+# new version or a security fix. CI then tells us whether the update is safe.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      dev-tools:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns: ["*"]

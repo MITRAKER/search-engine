@@ -1,0 +1,135 @@
+# Continuous integration: every push and pull request must pass all of these
+# checks before it can be merged. It also runs once a day, so a new bug in a
+# dependency or a new security advisory is caught even when nobody pushes
+# (NASA/JPL rule 10: analyze the code every day).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  quality:
+    name: Lint, format, types, JPL rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: python -m pip install -c requirements-dev.txt -e ".[dev]"
+      - name: Lint (ruff)
+        run: ruff check --output-format=github .
+      - name: Format (ruff)
+        run: ruff format --check --diff .
+      - name: Types (mypy --strict)
+        run: mypy
+      - name: NASA/JPL Power of Ten rules
+        run: python scripts/check_jpl.py searchengine scripts tests
+      - name: Repository hygiene (pre-commit hooks)
+        env:
+          SKIP: ruff-check,ruff-format,mypy,jpl-rules # already run above
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -c requirements-dev.txt -e ".[dev]"
+      - name: Test with coverage
+        run: pytest --cov --cov-report=term --cov-report=xml --cov-fail-under=95
+      - name: Upload coverage report
+        if: matrix.python-version == '3.13'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+
+  security:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install pip-audit
+        run: python -m pip install -c requirements-dev.txt pip-audit
+      - name: pip-audit (known vulnerabilities in every pinned dependency)
+        run: pip-audit --strict --progress-spinner off -r requirements-dev.txt --no-deps --disable-pip
+
+  build:
+    name: Build and smoke-test the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Install the wheel in a clean environment and run it
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          cd /tmp && /tmp/smoke/bin/searchengine "inverted index" -k 1 | grep "Inverted index"
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
