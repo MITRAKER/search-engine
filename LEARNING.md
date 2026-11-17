@@ -1,160 +1,406 @@
 # Learning guide: how this search engine was built
 
-This file grows with the project. Each chapter covers one milestone:
+This guide grows with the project. Each chapter covers one milestone:
 **what** was built, **why** it was designed that way, the **concepts** you
 need, and **exercises** so you can rebuild it yourself.
 
-Read the chapters in order. Keep the code open next to the text.
+Read the chapters in order, with the code open next to the text. Every claim
+here is backed by a test in `tests/`, so when in doubt, read the test.
+
+| Chapter | Topic | Status |
+|---|---|---|
+| 1 | Project setup | ✅ |
+| 2 | The engine, from scratch | ✅ |
+| 3 | Engineering like a professional team: CI/CD, quality gates, NASA/JPL rules | ✅ |
+| 4 | Elasticsearch | coming next |
+| 5 | Measuring search quality on SciFact | planned |
+| 6 | Web UI and API | planned |
 
 ---
 
 ## Chapter 1: Project setup
 
 ### What was built
-- A Python package `searchengine/` with no dependencies outside the standard library.
-- A dataset loader (`datasets.py`) that reads **JSON Lines**.
-- A small sample dataset (`data/sample.jsonl`, 25 docs) for tests and demos.
-- `docker-compose.yml` that runs Elasticsearch locally (used from Chapter 3).
-- A GitHub Actions workflow that runs the tests on every push.
+
+- A Python package, `searchengine/`, that needs nothing outside the standard
+  library to run.
+- `pyproject.toml`: one file that describes the package (name, version,
+  dependencies, the `searchengine` command) and configures every tool.
+- A 25-document sample dataset in **JSON Lines**, shipped inside the package
+  so `pip install` users can try the engine immediately.
+- `docker-compose.yml`, which starts Elasticsearch locally (used from Chapter 4).
 
 ### Why these choices
+
 - **Pure Python first.** Using no libraries forces you to understand every
   piece. Elasticsearch comes later, so you can compare it with what you built.
-- **JSON Lines** (one JSON object per line) instead of one big JSON array: you
-  can read it line by line, so a 10 GB dataset never has to fit in memory.
+- **JSON Lines** (one JSON object per line) instead of one big JSON array: it
+  can be read line by line, so a 10 GB file never has to fit in memory.
   Elasticsearch's bulk API uses the same idea.
-- **A tiny dataset you can read in one minute.** When a test fails you can
-  reason about the expected answer by hand. Larger datasets come in Chapter 4.
-- **CI from day one.** A green badge on GitHub tells a recruiter the project works.
+- **A tiny dataset you can read in a minute.** When a test fails you can work
+  out the right answer by hand. The real benchmark comes in Chapter 5.
 
 ### Concepts
+
 - **Document**: the unit you search and return, here `{id, title, body}`.
 - **Field**: a named part of a document. Fields can be weighted differently.
-- **Docker Compose**: describes containers in a file so `docker compose up`
-  starts the same setup on any machine.
+- **Virtual environment** (`python -m venv .venv`): a private set of packages
+  for one project, so projects never fight over versions.
+- **Editable install** (`pip install -e .`): Python imports the package
+  straight from your working copy, so code changes take effect immediately.
 
 ### Exercises
-1. Add a `url` field to a few documents. Does anything break? Why not?
-2. Run `docker compose up -d`, then `curl localhost:9200`. What version is it?
+
+1. Add a `url` field to a few sample documents. Does anything break? Why not?
+   (Hint: look at `_stored_fields` in `index.py`.)
+2. Run `pip install -e .` in a fresh virtual environment, then
+   `searchengine "stemming"`. Where does the command come from?
+   (Hint: `[project.scripts]` in `pyproject.toml`.)
 
 ---
 
 ## Chapter 2: The engine, from scratch
 
-The whole engine is about 200 lines in `analyzer.py` and `index.py`.
+The engine is about 900 lines, half of them comments, across `analyzer.py`,
+`porter.py`, `index.py`, `scoring.py` and `spelling.py`.
 
-### Step 1: Analysis (`analyzer.py`)
+### 2.1 Analysis: from text to terms (`analyzer.py`)
 
-Raw text goes through a pipeline before being stored:
+Before anything is stored, text goes through a pipeline:
 
 ```
 "The Runners are RUNNING!"
-  tokenize   -> ["the", "runners", "are", "running"]
-  stopwords  -> ["runners", "running"]
-  stem       -> ["runner", "run"]
+  tokenize          -> the, runners, are, running      (positions 0, 1, 2, 3)
+  drop stopwords    -> runners@1, running@3
+  stem (Porter)     -> runner@1, run@3
 ```
 
-- **Tokenize**: split into words and lowercase. A regex `[a-z0-9]+` is enough here.
-- **Stopwords**: drop very common words ("the", "and"). They match almost every
-  document, so they help ranking very little and make the index bigger.
-- **Stemming**: cut suffixes so "running", "runs" and "run" become the same
-  term. The root doesn't need to be a real word ("query" can become "queri" in
-  some stemmers). It only needs to be **consistent**.
+- **Tokenize**: find runs of letters or digits in any script, with the regex
+  `[^\W_]+`, and lowercase them. "café", "2026" and "جستجو" are all tokens.
+- **Stopwords**: drop very common words ("the", "and"). They appear in almost
+  every document, so they barely help ranking. We use **Lucene's 33 English
+  stopwords**, the exact list Elasticsearch uses.
+- **Stemming**: cut suffixes so "running", "runs" and "run" become one term.
+- **Positions keep gaps.** "index" in "inverted the index" is at position 2,
+  not 1, even though "the" was dropped. Lucene does the same, and it stops the
+  phrase "inverted index" from matching "inverted the index".
 
-**The key rule:** the *same* analyzer must run on documents and on queries.
-If the query keeps "Running" but the index stored "run", nothing matches.
-In Elasticsearch, a mismatch between index-time and search-time analyzers is a
-common cause of "why doesn't this match?" bugs.
+**The key rule:** the *same* analyzer runs on documents and on queries. If
+the query keeps "Running" but the index stored "run", nothing matches. A
+mismatch between index-time and search-time analysis is one of the most
+common Elasticsearch bugs in real projects.
 
-### Step 2: The inverted index (`index.py`, `add`)
+### 2.2 The Porter stemmer (`porter.py`)
+
+The first version of this project used a home-made suffix stripper. It had a
+bug that shows why stemmers are hard: "engines" became "engin" but "engine"
+stayed "engine", so a search for one never found the other. The fix was to
+implement the real thing: Martin Porter's 1980 algorithm, which is also what
+Elasticsearch's `porter_stem` filter runs.
+
+The central idea: write any word as consonant groups (C) and vowel groups (V):
+
+```
+[C](VC)^m[V]        m is the "measure"
+
+tree    -> [tr][ee]          m = 0
+trouble -> [tr](ou bl)[e]    m = 1
+private -> [pr](iv)(at)[e]   m = 2
+```
+
+Most rules only fire when the stem that remains is long enough, so short
+words survive: "rate" keeps its "-ate" because the "r" left over is too
+short (m=0), while "activate" loses it ("activ" has m=2).
+The algorithm runs five steps: plurals and -ed/-ing (`caresses -> caress`,
+`hopping -> hop`), y to i (`happy -> happi`), double suffixes
+(`relational -> relate`), -ic/-ful/-ness, then -ance/-ment/-ive and a
+final -e.
+
+**How we know it is right:** we sent 36,007 words through Elasticsearch's own
+`_analyze` API and compared. Zero differences. 3,107 of them are stored in
+`tests/data/porter_golden.json`, so the test runs without Elasticsearch.
+This kind of test, where a trusted system provides the expected answers, is
+called an **oracle** or **golden** test.
+
+### 2.3 The inverted index (`index.py`)
 
 A book's index says "Lucene: pages 12, 48". An inverted index does the same
-for terms:
+for terms, and also records the field and position of every occurrence:
 
 ```
-postings["invert"] = {"1": [0, 102, 204, 306, 317], "15": [318]}
-          term          doc id: positions where the term occurs
+postings["invert"] = {"1":  {"title": [0], "body": [1, 12]},
+                      "15": {"body": [9]}}
+          term        doc id  field    positions
 ```
 
-To search, we only look at the docs listed under the query terms. We never
-scan the whole collection. That is why search engines stay fast with
-billions of documents.
+To search, we only read the posting lists of the query terms, never the whole
+collection. That is why search engines stay fast with billions of documents.
+We store **positions** because phrase search needs to know which words are
+next to each other, and we keep **fields separate** so they can be weighted
+at query time.
 
-We store **positions** (not only "doc contains term") because phrase search
-needs to know which words are next to each other.
+`add()` analyzes the whole document before changing anything. If any field is
+invalid, it raises an error and the index is untouched (there is a test for
+this). Databases call this property **atomicity**.
 
-**Field boosting:** title terms are recorded 3 times (`field_boosts`). A word
-in the title is a stronger signal than the same word in the body.
-Elasticsearch does this with `"title^3"` at query time instead. We add a gap of
-100 positions between fields and copies so a phrase can't match across them.
+### 2.4 Ranking
 
-### Step 3: Ranking
+Finding the matching documents is the easy part. Putting the **best** ones
+first is the hard part. All formulas live in `scoring.py`.
 
-Finding matching docs is easy. Putting the **best** ones first is the hard part.
+**TF-IDF**, the classic:
 
-**TF-IDF**
+- **TF (term frequency)**: a document that says "bm25" 4 times is probably
+  more about BM25 than one that says it once. We use `log(1 + tf)` so the
+  100th repetition does not count 100 times.
+- **IDF (inverse document frequency)**: `log(N / df)`. "search" appears in 12
+  of our 25 documents, so it barely tells them apart. "pagerank" appears in
+  one, so matching it means a lot.
+- Score = sum over the query terms of `tf part x idf`.
 
-- **TF (term frequency)**: a doc that mentions "bm25" 3 times is probably more
-  about BM25 than one that mentions it once.
-- **IDF (inverse document frequency)**: `log(1 + (N - df + 0.5) / (df + 0.5))`.
-  "search" appears in 12 of 25 docs, so it barely tells docs apart. "pagerank"
-  appears in 1, so a match on it is very informative.
-- Score = sum over query terms of `log(1 + tf) * idf`.
-
-**BM25** (Elasticsearch's default) fixes two weaknesses of TF-IDF:
+**BM25**, the default in Elasticsearch and Lucene, improves on TF-IDF in two ways:
 
 ```
-            tf * (k1 + 1)
-idf  *  ---------------------------------------
-        tf + k1 * (1 - b + b * docLen / avgLen)
+                         tf x (k1 + 1)
+score = idf  x  ---------------------------------------      idf = log(1 + (N - df + 0.5) / (df + 0.5))
+                tf + k1 x (1 - b + b x docLength / avgLength)
 ```
 
-- **Saturation (`k1 = 1.2`)**: the 1st occurrence of a word matters a lot, the
-  20th barely matters. The tf part can never exceed `k1 + 1`. This stops
-  keyword-stuffed documents from winning. See `test_bm25_saturates_term_frequency`.
-- **Length normalization (`b = 0.75`)**: a match in a 20-word doc is stronger
-  evidence than one match in a 5,000-word doc. With `b = 0` length is ignored;
-  with `b = 1` it is fully normalized.
+- **Saturation (`k1 = 1.2`)**: the first occurrence of a word matters a lot,
+  the twentieth barely matters. The tf part can never exceed `k1 + 1`. This
+  stops keyword-stuffed documents from winning.
+- **Length normalization (`b = 0.75`)**: one match in a 20-word document is
+  stronger evidence than one match in a 5,000-word document. `b = 0` turns
+  this off, `b = 1` normalizes fully.
 
-### Step 4: Query features
+**BM25F: one score across several fields.** A word in the title should count
+more than a word in the body. BM25F multiplies each field's term frequency
+and length by the field's weight (title 3, body 1 by default), adds them up
+as if they formed one "virtual" field, and then applies BM25 once:
 
-- **OR vs AND** (`mode`): OR returns docs with *any* term (better recall), AND
-  requires *all* terms (better precision). We take the union or the
-  intersection of the posting lists.
-- **Phrase search** (`"search engine"`): first AND the terms, then check
-  positions. The phrase matches if "engine" occurs at position `p + 1` for
-  some position `p` of "search".
-- **Typo tolerance** (`fuzzy=True`): for an unknown term, find the indexed term
-  with the smallest **Levenshtein distance** (the fewest insertions, deletions
-  or substitutions). `edit_distance` uses classic dynamic programming. Ties go
-  to the more common word. Elasticsearch's `"fuzziness": "AUTO"` uses the same
-  idea, but much faster, using automata.
-- **"Did you mean"** (`suggest`): runs the same correction and shows it instead
-  of applying it silently.
+```
+tf     = 3 x tf_title     + 1 x tf_body
+length = 3 x length_title + 1 x length_body
+```
+
+Applying BM25 once (instead of scoring each field and adding the scores) means
+saturation works across fields, so a document cannot win just by repeating a
+word in both. Elasticsearch's `combined_fields` query uses exactly this model.
+
+**Verified against Elasticsearch.** On the sample data, our scores equal
+Elasticsearch 9.5's to 6 decimal places, for single-field queries, phrase
+queries and `combined_fields` queries. (Chapter 4 turns this into an
+automated test.)
+
+### 2.5 Query features
+
+- **OR vs AND** (`SearchOptions(mode=...)`): OR returns documents with *any*
+  term (better recall), AND requires *all* of them (better precision).
+- **Phrases** (`"search engine"` in double quotes): a document matches when,
+  in the same field, every term sits at the right distance from the first.
+  For the query `"inverted the index"` the distances are 0 and 2, gap included.
+  Phrases are scored like Lucene does: tf is the **number of times the whole
+  phrase occurs**, and idf is the sum of the terms' idfs.
+- **Typo tolerance** (`fuzzy=True`): for each query word the index does not
+  know, find the known word with the smallest **Levenshtein distance** (the
+  fewest letters inserted, deleted or substituted). `edit_distance` uses
+  dynamic programming with one row of memory and stops early once the
+  distance must exceed the limit. Like Elasticsearch's `"fuzziness": "AUTO"`,
+  we allow 0 typos in words of 1 or 2 letters, 1 in words of 3 to 5, and 2 in
+  longer words. We correct the **surface** words people type ("rankng" to
+  "ranking"), not the stems, because that is where typos happen. Ties go to
+  the more frequent word, then alphabetical order, so results never depend on
+  the order documents were added.
+- **"Did you mean"** (`suggest`): the same correction, shown instead of applied.
+- **`explain(query, doc_id)`**: lists each clause's idf, tf and contribution.
+  The parts always add up to the score (there is a test for that too).
+
+### 2.6 How a search runs
+
+```
+query --parse--> terms --postings--> candidate docs --BM25F--> scores --heap--> top k
+```
+
+We score **term at a time**: for each query term, walk its posting list and
+add its contribution to a running total per document. Then
+`heapq.nsmallest(k, ...)` picks the best k in O(n log k) without sorting
+everything. Ties are broken by document id, so results are reproducible.
 
 ### Try it
 
 ```bash
-python -m searchengine.cli "inverted index"
-python -m searchengine.cli "elastisearch rankng"          # shows "Did you mean"
-python -m searchengine.cli --fuzzy "elastisearch rankng"
-python -m searchengine.cli '"search engine"'
-python -m searchengine.cli --ranker tfidf "ranking"
+searchengine "inverted index"
+searchengine "elastisearch rankng"            # prints "Did you mean"
+searchengine --fuzzy "elastisearch rankng"
+searchengine '"search engine"'
+searchengine '"inverted the index"'           # no results: the gap matters
+searchengine --explain "bm25 ranking"
+searchengine --ranker tfidf "ranking"
 ```
 
 ### Interview questions you can now answer
-- *Why is an inverted index fast?* You only touch the posting lists of the
-  query terms, never every document.
-- *BM25 vs TF-IDF?* Term frequency saturation and length normalization.
-- *How does phrase search work?* Positional postings.
+
+- *Why is an inverted index fast?* A query only reads the posting lists of
+  its terms, never every document.
+- *BM25 vs TF-IDF?* Term-frequency saturation (k1) and length normalization (b).
+- *How do you search several fields?* BM25F: weight the term frequencies and
+  lengths, then score once, like Elasticsearch's `combined_fields`.
+- *How does phrase search work?* Positional postings, and checking that the
+  terms sit at the right distances.
+- *Why must index-time and query-time analysis match?* Otherwise identical
+  words become different terms and never match.
 - *How would you handle typos?* Edit distance against the vocabulary, limited
-  to distance 1 to 2, filtered by length first because it is expensive.
+  by word length, with the cheap length filter applied first.
 
 ### Exercises
-1. Set `b=0` in `score_bm25` and search "ranking". Which docs move, and why?
-2. Remove "the" from `STOPWORDS` and search `"the inverted index"`. What changes?
-3. Add a `synonyms` dict (`{"es": "elasticsearch"}`) and expand query terms with it.
-4. `correct()` compares against every term in the vocabulary. How would you make
-   it faster for 1 million terms? (Hint: n-gram indexes or BK-trees.)
-5. Write a test showing that a doc with "cat" 100 times does not beat a doc
-   whose *title* is "cat".
+
+1. In `scoring.py`, set `b` to 0 and search "search". Which documents move,
+   and why?
+2. Remove "the" from `ENGLISH_STOPWORDS` and search `"inverted the index"`.
+   What changes, and why?
+3. Add synonyms: expand the query term "es" to "elasticsearch" in `parse()`.
+4. Elasticsearch counts swapping two neighbouring letters ("hte" for "the") as
+   **one** edit (Damerau-Levenshtein). Change `edit_distance` to do the same,
+   and add a test.
+5. `SpellingIndex.correct` compares against every word of similar length.
+   How would you make it fast for a million words? (Look up BK-trees and
+   SymSpell.)
+
+---
+
+## Chapter 3: Engineering like a professional team
+
+Code that works on your laptop is the start, not the finish. This chapter
+covers the safety net that catches mistakes before they reach `main`.
+
+### 3.1 The quality gates
+
+Every pull request runs all of these in GitHub Actions. You can run them
+locally with `make check`.
+
+| Gate | Tool | Example of what it catches |
+|---|---|---|
+| Lint | ruff, 20 rule sets | an unused variable, a mutable default argument, `assert` on a tuple |
+| Format | ruff format | inconsistent quotes and line breaks (it fixes them) |
+| Types | `mypy --strict` | calling `.lower()` on something that might be `None` |
+| Coding standard | `scripts/check_jpl.py` | recursion, `while True`, a 70-line function |
+| Tests | pytest + coverage | a broken ranking; untested branches |
+| Properties | Hypothesis | a crash on some odd Unicode input nobody thought of |
+| Dependencies | pip-audit, Dependabot | a library version with a known vulnerability |
+| Security | CodeQL, ruff's bandit rules | unsafe calls, injection risks, risky workflow settings |
+
+Real examples from this project: mypy caught a variable declared twice in
+`_clauses`; ruff flagged a regex with unescaped
+metacharacters in a test; Hypothesis checks `edit_distance` against a
+textbook implementation on hundreds of random string pairs.
+
+### 3.2 NASA/JPL's "Power of Ten"
+
+NASA's Jet Propulsion Laboratory writes the software that flies spacecraft,
+where a crash cannot be fixed by restarting. In 2006 Gerard Holzmann
+condensed their experience into ten rules. They were written for C, so
+[docs/CODING_STANDARD.md](docs/CODING_STANDARD.md) translates each one into
+Python and names the tool that enforces it. The short version:
+
+1. **No recursion.** Our Porter stemmer first decided whether a "y" is a
+   vowel by calling itself on the previous letter. It now computes a
+   consonant mask in one loop.
+2. **Every loop has a bound.** No `while True`, and every input that drives a
+   loop has a size limit: text length, token length, query terms, results.
+3. **No unbounded memory growth.** Even our statistics cache has a cap.
+4. **Short functions.** At most 60 lines and complexity 10.
+5. **Check for the impossible.** Every public function validates its inputs
+   with clear errors; `assert` only guards internal invariants.
+6. **Smallest scope.** No global state; constants are `Final` and immutable.
+7. **Check every result.** `mypy --strict` makes you handle `None`; saved
+   index files are validated before they are trusted.
+8. **No runtime code generation.** No `eval` or `exec`.
+9. **Simple indirection.** No `getattr` with computed names; a static call graph.
+10. **Zero warnings, analyzed daily.** Any warning fails the tests, and CI
+    runs every day even when nobody pushes.
+
+**How `check_jpl.py` works.** Python can parse its own source into an
+**abstract syntax tree** (the `ast` module). The checker walks that tree:
+function length is `end_lineno - lineno + 1`; `while True` is a `While` node
+whose test is a true constant; recursion is found by building a **call graph**
+(which function calls which) and searching it for cycles. It has its own
+tests, including one that runs it on this project's code.
+
+### 3.3 CI/CD with GitHub Actions
+
+A **workflow** (`.github/workflows/*.yml`) says *when* to run (`on:` push,
+pull request, schedule, tag) and *what* to run (`jobs:`, each a list of
+`steps:`). Things worth noticing in `ci.yml`:
+
+- **Matrix**: the test job runs once per Python version (3.11 to 3.14).
+- **Least privilege**: the token gets `contents: read` unless a job needs more.
+- **Pinned actions**: `actions/checkout@3d3c42e5...  # v7.0.1`. A tag like
+  `v7` can be moved by whoever controls it; a commit SHA cannot. Dependabot
+  keeps the pins up to date.
+- **Reproducible installs**: `requirements-dev.txt` pins every tool to an
+  exact version, so CI behaves the same today and next month.
+- **Daily schedule**: catches new vulnerabilities and breaking dependency
+  releases even when the code did not change.
+- **Packaging test**: the wheel is built, installed in an empty environment
+  and actually run.
+
+**CD (continuous delivery)**: `release.yml` runs when a tag such as `v0.1.0`
+is pushed. It checks the tag matches `__version__`, runs the tests, builds
+the package, attaches a signed **build provenance attestation** (proof of
+which workflow built which file) and publishes a GitHub Release with the
+notes from `CHANGELOG.md`.
+
+**Semantic Versioning**: `MAJOR.MINOR.PATCH`. Breaking change: bump major.
+New feature: bump minor. Bug fix: bump patch.
+
+### 3.4 Testing strategy
+
+- **Unit tests**: one behavior each, named for the behavior
+  (`test_phrase_respects_word_order`).
+- **Hand calculations**: `test_bm25f_score_matches_hand_calculation` computes
+  the expected score on paper, independently of `scoring.py`.
+- **Golden (oracle) tests**: Elasticsearch's stems for 3,107 words.
+- **Property-based tests** with Hypothesis: instead of one example, state a
+  rule ("search never crashes and every score is positive") and let the
+  library generate hundreds of inputs to break it.
+- **Error-path tests**: every `raise` has a test, which is how coverage reaches
+  100% of lines *and* branches.
+
+### 3.5 Your daily workflow
+
+```bash
+make install                     # once: tools and git hooks
+git switch -c feat/my-change     # never work on main
+# ... edit, then:
+make check                       # the same gates as CI
+git commit -m "feat: add synonym expansion"   # Conventional Commits
+git push -u origin feat/my-change             # then open a pull request
+```
+
+`pre-commit` runs the fast checks on every commit, so CI rarely fails. The
+pull request template reminds you to update the CHANGELOG and this guide.
+CODEOWNERS asks the maintainer to review every change.
+
+### Interview questions you can now answer
+
+- *What is the difference between CI and CD?* CI checks every change
+  automatically; CD automates releasing a checked version.
+- *Why pin GitHub Actions to a SHA?* Tags can be moved to malicious code;
+  commit SHAs cannot.
+- *What is property-based testing?* Testing a rule over many generated
+  inputs rather than a few hand-picked examples.
+- *What are NASA's Power of Ten rules and how do they apply outside C?*
+  See 3.2: bounded loops and inputs, no recursion, short functions,
+  validated inputs, static analysis with zero warnings.
+- *Is 100% coverage enough?* No. Coverage shows which lines ran, not whether
+  the assertions were right. That is why we also use oracles and properties.
+
+### Exercises
+
+1. Write a function with a `while True:` loop and run
+   `python scripts/check_jpl.py yourfile.py`. Then rewrite the loop with a bound.
+2. Add a rule to `check_jpl.py` that rejects bare `except:` clauses, with a test.
+3. Break a test on purpose, push a branch and watch CI fail. Read the log,
+   fix it, and watch it pass.
+4. Read one Dependabot pull request when it arrives. What changed, and how do
+   you know it is safe to merge?

@@ -6,7 +6,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from searchengine import InvertedIndex, SearchOptions
-from searchengine.index import MAX_QUERY_TERMS, MAX_RESULTS
+from searchengine.index import MAX_CACHED_WEIGHTINGS, MAX_QUERY_TERMS, MAX_RESULTS
 from tests.helpers import make_index
 
 # ---------- indexing ----------
@@ -310,3 +310,10 @@ def test_empty_documents_do_not_count_towards_statistics():
     with_empty = make_index("cat dog", "", "dog")
     without = make_index("cat dog", "dog")
     assert with_empty.search("cat")[0].score == pytest.approx(without.search("cat")[0].score)
+
+
+def test_statistics_cache_stays_bounded():
+    index = make_index("cat dog", titles=("cat",))
+    for weight in range(1, MAX_CACHED_WEIGHTINGS * 3):
+        index.search("cat", field_weights={"title": float(weight), "body": 1.0})
+    assert len(index._stats_cache) <= MAX_CACHED_WEIGHTINGS

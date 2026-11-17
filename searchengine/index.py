@@ -38,6 +38,7 @@ DEFAULT_FIELD_WEIGHTS: Final[Mapping[str, float]] = MappingProxyType({"title": 3
 MAX_RESULTS: Final = 1000
 MAX_QUERY_TERMS: Final = 64
 MAX_DOC_ID_LENGTH: Final = 512  # Elasticsearch's limit for _id, in bytes
+MAX_CACHED_WEIGHTINGS: Final = 32  # bounds the statistics cache (JPL rule 3)
 FORMAT_VERSION: Final = 2
 
 # term -> doc id -> field -> positions
@@ -214,6 +215,8 @@ class InvertedIndex:
         least one term in the searched fields (Lucene counts the same way)."""
         key = tuple(sorted(weights.items()))
         if key not in self._stats_cache:
+            if len(self._stats_cache) >= MAX_CACHED_WEIGHTINGS:
+                self._stats_cache.clear()
             n, total = 0, 0.0
             for lengths in self.field_lengths.values():
                 if any(lengths[field] for field in weights):
