@@ -7,6 +7,35 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The same engine on Elasticsearch, in `searchengine.es_engine`
+  (`pip install -e ".[es]"`):
+  - A custom analyzer with the same steps as ours, one shard and the same
+    BM25 parameters, so word queries (OR and AND, any field weights, through
+    `combined_fields`) get the same scores as the from-scratch engine.
+  - Bulk loading with `create` actions, so a duplicate id is an error rather
+    than an overwrite.
+  - Facet counts per category with a `post_filter`, HTML-escaped highlighted
+    snippets, title autocomplete (`search_as_you_type`), "did you mean" (a
+    term suggester), fuzzy search, and Elasticsearch's `_explain`.
+  - Every request is built as plain data by `searchengine.es_dsl`, so it can
+    be tested without a server.
+- `searchengine --engine es`, with `--index`, `--reindex` and `--category`.
+- Integration tests that run both engines side by side on a real
+  Elasticsearch (`make integration`), and a CI job that runs them against an
+  Elasticsearch service container.
+- Dependabot updates for the Elasticsearch image.
+- `LEARNING.md` chapter 4: the same engine on Elasticsearch.
+
+### Changed
+
+- `docker-compose.yml` pins Elasticsearch by digest. CI uses the same image,
+  and a test fails if the two differ.
+- `scripts/make_parity_golden.py` builds its index and queries with
+  `searchengine.es_dsl`, the code the engine uses. The recorded scores did
+  not change.
+
 ## [0.1.0] - 2026-11-17
 
 ### Added
