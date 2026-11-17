@@ -3,7 +3,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from searchengine import ENGLISH_STOPWORDS, Token, analyze, analyze_tokens, tokenize
-from searchengine.analyzer import MAX_TEXT_LENGTH, MAX_TOKEN_LENGTH
+from searchengine.analyzer import MAX_TEXT_LENGTH, MAX_TOKEN_LENGTH, is_searchable, java_length
 
 
 def test_tokenize_lowercases_and_splits_on_punctuation():
@@ -60,3 +60,53 @@ def test_analysis_is_total_and_positions_increase(text):
     positions = [token.position for token in tokens]
     assert positions == sorted(set(positions))
     assert all(token.term and token.surface for token in tokens)
+
+
+# ---------- details that must match Lucene exactly ----------
+
+
+def test_lowercasing_is_one_character_at_a_time_like_java():
+    """Python's str.lower() turns a dotted capital I into "i" plus a combining
+    dot, and a final capital sigma into the final-form sigma. Java lowercases
+    each character on its own, with neither rule, and so must we."""
+    dotted_i = "\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}"
+    assert tokenize(f"{dotted_i}STANBUL") == ["istanbul"]
+    capitals = "\N{GREEK CAPITAL LETTER DELTA}\N{GREEK CAPITAL LETTER SIGMA}"
+    smalls = "\N{GREEK SMALL LETTER DELTA}\N{GREEK SMALL LETTER SIGMA}"
+    assert capitals.lower() != smalls  # Python's own rule differs...
+    assert tokenize(capitals) == [smalls]  # ...ours matches Java
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "हिन्दी",  # Devanagari vowel signs and virama are combining marks
+        "cafe\N{COMBINING ACUTE ACCENT}",  # an accent typed as its own character
+        "مَرْحَبًا",  # Arabic vowel marks
+        "\N{BRAHMI SIGN CANDRABINDU}\N{BRAHMI VOWEL SIGN AA}x",  # marks outside the BMP
+    ],
+)
+def test_combining_marks_stay_inside_words(word):
+    assert tokenize(f"{word} next") == [word, "next"]
+
+
+def test_token_length_counts_utf16_units_like_java():
+    bold_a = "\N{MATHEMATICAL BOLD CAPITAL A}"  # outside the BMP: 2 units in Java
+    assert java_length(bold_a) == 2
+    assert java_length("café") == 4
+    assert len(analyze(bold_a * (MAX_TOKEN_LENGTH // 2))) == 1  # 254 units: kept
+    assert analyze(bold_a * (MAX_TOKEN_LENGTH // 2 + 1)) == []  # 256 units: dropped
+
+
+def test_is_searchable_drops_stopwords_and_long_tokens():
+    assert is_searchable("search")
+    assert is_searchable("x" * MAX_TOKEN_LENGTH)
+    assert not is_searchable("the")
+    assert not is_searchable("x" * (MAX_TOKEN_LENGTH + 1))
+
+
+@given(st.text(max_size=200))
+def test_a_token_tokenizes_to_itself(text):
+    """Lowercasing never splits or joins tokens, so analysis is stable."""
+    for token in tokenize(text):
+        assert tokenize(token) == [token]

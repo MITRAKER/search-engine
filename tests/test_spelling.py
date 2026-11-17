@@ -83,3 +83,22 @@ def test_from_counts_round_trip():
 def test_from_counts_rejects_bad_entries(counts):
     with pytest.raises(ValueError, match="invalid"):
         SpellingIndex.from_counts(counts)
+
+
+def test_candidates_come_best_first():
+    """Fewest edits, then the more common word, then alphabetical."""
+    spelling = make_spelling("card", "card", "cart", "care", "cord", "carts")
+    assert spelling.candidates("carx") == ["card", "care", "cart"]
+    assert spelling.candidates("card") == ["card", "care", "cart", "cord"]
+
+
+def test_candidates_are_capped(monkeypatch):
+    monkeypatch.setattr("searchengine.spelling.MAX_CANDIDATES", 2)
+    spelling = make_spelling("cart", "care", "card", "card")
+    assert spelling.candidates("carx") == ["card", "care"]
+
+
+def test_short_words_get_no_corrections():
+    spelling = make_spelling("ab", "ac")
+    assert spelling.candidates("ax") == []
+    assert spelling.candidates("ab") == ["ab"]

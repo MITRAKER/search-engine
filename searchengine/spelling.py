@@ -6,11 +6,13 @@ the stemmed terms, because typos are made on real words.
 
 from __future__ import annotations
 
+import heapq
 from typing import Final
 
 # Elasticsearch's "fuzziness": "AUTO" allows 0 edits for words of 1-2
 # letters, 1 edit for 3-5 letters and 2 edits for longer words.
 MAX_EDITS: Final = 2
+MAX_CANDIDATES: Final = 50
 
 
 def max_edits_auto(word: str) -> int:
@@ -72,21 +74,26 @@ class SpellingIndex:
             self._by_length.setdefault(len(word), []).append(word)
         self.counts[word] += count
 
-    def correct(self, word: str) -> str:
-        """Return the closest known word, or ``word`` itself if it is known
-        or nothing is close enough.
+    def candidates(self, word: str) -> list[str]:
+        """Known words within the allowed number of typos, best first.
 
-        Ties go to the more common word, then to alphabetical order, so the
-        answer never depends on insertion order.
+        Best means fewest edits, then the more common word, then
+        alphabetical order, so the answer never depends on insertion order.
+        At most ``MAX_CANDIDATES`` are returned (JPL rule 3).
         """
         limit = max_edits_auto(word)
-        if word in self.counts or limit == 0:
-            return word
-        best, best_key = word, (limit + 1, 0, word)
+        found = []
         for length in range(len(word) - limit, len(word) + limit + 1):
             for candidate in self._by_length.get(length, ()):
                 distance = edit_distance(word, candidate, limit)
-                key = (distance, -self.counts[candidate], candidate)
-                if distance <= limit and key < best_key:
-                    best, best_key = candidate, key
-        return best
+                if distance <= limit:
+                    found.append((distance, -self.counts[candidate], candidate))
+        return [candidate for _, _, candidate in heapq.nsmallest(MAX_CANDIDATES, found)]
+
+    def correct(self, word: str) -> str:
+        """Return the closest known word, or ``word`` itself if it is known
+        or nothing is close enough."""
+        if word in self.counts:
+            return word
+        found = self.candidates(word)
+        return found[0] if found else word

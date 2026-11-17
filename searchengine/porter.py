@@ -5,7 +5,7 @@ Martin Porter, "An algorithm for suffix stripping", Program 14(3), 1980.
 This follows Porter's own reference implementation, which is also what
 Lucene's ``PorterStemmer`` (and so Elasticsearch's ``porter_stem`` filter)
 uses. ``tests/test_porter.py`` checks it against stems produced by
-Elasticsearch 8.15 itself. Matching it exactly means our engine and
+Elasticsearch 9.5.5 itself. Matching it exactly means our engine and
 Elasticsearch see the same terms, so when we compare them later, the
 differences come from ranking and not from text processing.
 

@@ -1,9 +1,9 @@
 """Try the engine from the terminal.
 
-python -m searchengine.cli "inverted index"
-python -m searchengine.cli --fuzzy "elastisearch rankng"
-python -m searchengine.cli --ranker tfidf '"search engine"'
-python -m searchengine.cli --explain "bm25 ranking"
+searchengine "inverted index"
+searchengine --fuzzy "elastisearch rankng"
+searchengine --ranker tfidf '"search engine"'
+searchengine --explain "bm25 ranking"
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from collections.abc import Sequence
 
 from .datasets import SAMPLE, load_jsonl
-from .index import InvertedIndex, SearchOptions
+from .index import MAX_RESULTS, InvertedIndex, SearchOptions
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,16 +29,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    """Run the command line. Returns the exit status: 0 for success."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not 1 <= args.k <= MAX_RESULTS:
+        parser.error(f"-k must be between 1 and {MAX_RESULTS}")
+    options = SearchOptions(ranker=args.ranker, mode=args.mode, fuzzy=args.fuzzy)
+    try:
+        _run(args, options)
+    except (OSError, ValueError, TypeError) as error:
+        # Bad input (a missing file, a malformed line, an overlong query) gets
+        # a one-line message, not a traceback.
+        print(f"searchengine: error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run(args: argparse.Namespace, options: SearchOptions) -> None:
     index = InvertedIndex()
     index.add_many(load_jsonl(args.data))
-    options = SearchOptions(ranker=args.ranker, mode=args.mode, fuzzy=args.fuzzy)
-
+    # Search first: it checks the query, so a bad one fails before any other work.
+    hits = index.search(args.query, k=args.k, options=options)
     suggestion = index.suggest(args.query)
     if suggestion and not args.fuzzy:
         print(f"Did you mean: {suggestion}?  (add --fuzzy to search for it)\n")
-
-    hits = index.search(args.query, k=args.k, options=options)
     if not hits:
         print("No results.")
     for rank, hit in enumerate(hits, start=1):
@@ -47,7 +61,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             for part in index.explain(args.query, hit.doc_id, options=options):
                 terms = " ".join(part.terms)
                 print(f"      {terms:<24} idf={part.idf:.3f}  tf={part.tf:g}  -> {part.score:.3f}")
-    return 0
 
 
 if __name__ == "__main__":

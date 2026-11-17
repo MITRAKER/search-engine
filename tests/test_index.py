@@ -6,7 +6,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from searchengine import InvertedIndex, SearchOptions
-from searchengine.index import MAX_CACHED_WEIGHTINGS, MAX_QUERY_TERMS, MAX_RESULTS
+from searchengine.index import (
+    MAX_FIELD_WEIGHT,
+    MAX_FIELDS,
+    MAX_QUERY_TERMS,
+    MAX_RESULTS,
+    MIN_FIELD_WEIGHT,
+)
 from tests.helpers import make_index
 
 # ---------- indexing ----------
@@ -34,6 +40,7 @@ def test_extra_fields_are_stored_not_indexed():
         ({"id": "", "title": "empty id"}, ValueError),
         ({"id": "x" * 513}, ValueError),
         ({"id": "1", "title": 5}, TypeError),
+        (["not", "a", "mapping"], TypeError),
     ],
 )
 def test_invalid_documents_are_rejected(doc, error):
@@ -61,6 +68,15 @@ def test_fields_must_be_distinct_and_non_empty():
         InvertedIndex(fields=())
     with pytest.raises(ValueError, match="fields"):
         InvertedIndex(fields=("a", "a"))
+    with pytest.raises(ValueError, match="fields"):
+        InvertedIndex(fields=[f"f{i}" for i in range(MAX_FIELDS + 1)])
+
+
+@pytest.mark.parametrize("fields", ["body", ["title", 3], ["title", ""]])
+def test_fields_must_be_a_list_of_names(fields):
+    """A bare string would otherwise become one field per letter."""
+    with pytest.raises(TypeError):
+        InvertedIndex(fields=fields)
 
 
 # ---------- BM25F, checked against the formula by hand ----------
@@ -100,11 +116,73 @@ def test_shorter_documents_win_ties_on_frequency():
 
 
 @pytest.mark.parametrize(
-    "weights", [{"unknown": 1.0}, {"title": 0.0}, {"title": -1.0}, {"title": math.inf}, {}]
+    "weights",
+    [
+        {"unknown": 1.0},
+        {},
+        {"title": 0.0},
+        {"title": -1.0},
+        {"title": 0.5},  # Elasticsearch's combined_fields refuses weights under 1
+        {"title": MAX_FIELD_WEIGHT * 2},
+        {"title": math.inf},
+        {"title": math.nan},
+    ],
 )
 def test_invalid_field_weights(weights):
     with pytest.raises(ValueError, match="field"):
         make_index("x").search("x", field_weights=weights)
+
+
+def test_field_weights_at_the_limits_work():
+    index = make_index("x", titles=("x",))
+    weights = {"title": MIN_FIELD_WEIGHT, "body": MAX_FIELD_WEIGHT}
+    assert [hit.doc_id for hit in index.search("x", field_weights=weights)] == ["1"]
+
+
+@pytest.mark.parametrize("weights", [{"title": True}, {"title": "3"}, [("title", 3.0)]])
+def test_field_weights_must_be_numbers_in_a_mapping(weights):
+    with pytest.raises(TypeError):
+        make_index("x").search("x", field_weights=weights)
+
+
+# ---------- the statistics Lucene's combined_fields uses ----------
+
+
+def test_document_frequency_is_the_largest_per_field_one():
+    """The word "apache" is in one title and in another document's body.
+    Counting documents with it anywhere would give df = 2; Lucene takes the
+    larger per-field count, 1, so the term is rarer and scores higher."""
+    index = make_index("apache", "web", "cats", titles=("server", "apache", "dogs"))
+    weights = {"title": 1.0, "body": 1.0}
+    [part] = index.explain("apache", "1", field_weights=weights)
+    assert part.idf == pytest.approx(math.log(1 + (3 - 1 + 0.5) / (1 + 0.5)))
+
+
+def test_n_is_the_largest_per_field_document_count():
+    """Two of three titles are empty: N is max(1, 3) = 3, not 1 or 4."""
+    index = make_index("cat", "dog", "bird", titles=("cat",))
+    [part] = index.explain("bird", "3")
+    assert part.idf == pytest.approx(math.log(1 + (3 - 1 + 0.5) / (1 + 0.5)))
+
+
+def test_long_documents_are_scored_with_lucene_lengths():
+    """A 41-term body is stored by Lucene as 40 terms long."""
+    long_body = " ".join(["cat"] + ["dog"] * 40)
+    index = make_index(long_body, "cat dog", titles=("", ""))
+    avgdl = (41 + 2) / 2  # the average uses the exact total length
+
+    def expected(dl: float) -> float:
+        idf = math.log(1 + (2 - 2 + 0.5) / (2 + 0.5))
+        return idf * 2.2 / (1 + 1.2 * (0.25 + 0.75 * dl / avgdl))
+
+    lucene = {hit.doc_id: hit.score for hit in index.search("cat")}
+    exact = {
+        hit.doc_id: hit.score
+        for hit in index.search("cat", options=SearchOptions(lucene_norms=False))
+    }
+    assert lucene["1"] == pytest.approx(expected(40))
+    assert exact["1"] == pytest.approx(expected(41))
+    assert lucene["2"] == exact["2"] == pytest.approx(expected(2))
 
 
 # ---------- ranking on the sample dataset ----------
@@ -158,6 +236,27 @@ def test_empty_index_returns_nothing():
 def test_k_is_bounded(sample_index, k):
     with pytest.raises(ValueError, match="k must be"):
         sample_index.search("search", k=k)
+
+
+@pytest.mark.parametrize("k", [True, "5", 2.5])
+def test_k_must_be_an_int(sample_index, k):
+    with pytest.raises(TypeError, match="k must be"):
+        sample_index.search("search", k=k)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [SearchOptions(k1=math.inf), SearchOptions(k1=-1), SearchOptions(b=1.5), SearchOptions(b=-0.1)],
+)
+def test_bm25_parameters_are_checked_before_scoring(options):
+    """Checked up front, even when nothing matches (k1 = inf would give NaN)."""
+    with pytest.raises(ValueError, match="k1"):
+        make_index("cat").search("dog", options=options)
+
+
+def test_options_must_be_search_options(sample_index):
+    with pytest.raises(TypeError, match="SearchOptions"):
+        sample_index.search("search", options={"mode": "and"})
 
 
 def test_query_length_is_bounded(sample_index):
@@ -235,6 +334,22 @@ def test_fuzzy_keeps_known_and_hopeless_words(sample_index):
     assert [token.term for token in parsed.tokens] == ["lucen", "zzzzzzzzzz"]
 
 
+def test_fuzzy_corrects_to_words_in_the_searched_fields():
+    """The word "lucene" is only in a title. Searching the body alone, the
+    closest body word, "lucent", is the useful correction."""
+    index = make_index("apples", "lucent", titles=("lucene", ""))
+    options = SearchOptions(fuzzy=True)
+    assert [hit.doc_id for hit in index.search("lucene", options=options)] == ["1"]
+    body_only = index.search("lucene", options=options, field_weights={"body": 1.0})
+    assert [hit.doc_id for hit in body_only] == ["2"]
+
+
+def test_suggest_is_bounded_like_search(sample_index):
+    with pytest.raises(ValueError, match="limited"):
+        sample_index.suggest(" ".join(["elastisearch"] * (MAX_QUERY_TERMS + 1)))
+    assert sample_index.suggest(" ".join(["the"] * (MAX_QUERY_TERMS + 1))) is None
+
+
 # ---------- explain ----------
 
 
@@ -250,6 +365,21 @@ def test_explain_unknown_document_is_empty(sample_index):
     assert sample_index.explain("ranking", "no-such-doc") == []
 
 
+def test_explain_follows_and_mode():
+    index = make_index("cat dog", "cat")
+    options = SearchOptions(mode="and")
+    [hit] = index.search("cat dog", options=options)
+    parts = index.explain("cat dog", hit.doc_id, options=options)
+    assert sum(part.score for part in parts) == pytest.approx(hit.score)
+    assert index.explain("cat dog", "2", options=options) == []  # search skips it too
+
+
+def test_explain_accepts_int_ids_like_add():
+    index = InvertedIndex()
+    index.add({"id": 7, "body": "cat"})
+    assert index.explain("cat", 7) == index.explain("cat", "7") != []
+
+
 # ---------- persistence ----------
 
 
@@ -261,6 +391,7 @@ def test_save_and_load_round_trip(sample_index, tmp_path):
         options = SearchOptions(fuzzy=True)
         assert loaded.search(query, options=options) == sample_index.search(query, options=options)
     assert loaded.stats() == sample_index.stats()
+    assert loaded.explain("ranking", "6") == sample_index.explain("ranking", "6")
 
 
 EMPTY_INDEX_FILE = {
@@ -273,6 +404,27 @@ EMPTY_INDEX_FILE = {
 }
 
 
+ONE_DOC = {"1": {"id": "1", "body": "cat"}}
+ONE_LENGTH = {"1": {"body": 1}}
+ONE_POSTING = {"cat": {"1": {"body": [0]}}}
+
+
+def index_file(**changes: object) -> str:
+    good = {
+        **EMPTY_INDEX_FILE,
+        "docs": ONE_DOC,
+        "field_lengths": ONE_LENGTH,
+        "postings": ONE_POSTING,
+    }
+    return json.dumps({**good, **changes})
+
+
+def test_index_file_helper_makes_a_valid_file(tmp_path):
+    path = tmp_path / "good.json"
+    path.write_text(index_file())
+    assert [hit.doc_id for hit in InvertedIndex.load(path).search("cat")] == ["1"]
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -280,6 +432,20 @@ EMPTY_INDEX_FILE = {
         '{"format": 1}',
         json.dumps({**EMPTY_INDEX_FILE, "docs": []}),
         json.dumps({**EMPTY_INDEX_FILE, "docs": {"1": {}}}),
+        index_file(fields=["body", "body"]),
+        index_file(fields=[]),
+        index_file(docs={"1": "cat"}),
+        index_file(docs={"1": {"id": "2", "body": "cat"}}),
+        index_file(docs={"1": {"id": "1", "body": 5}}),
+        index_file(field_lengths={"1": {}}),
+        index_file(field_lengths={"1": {"body": -1}}),
+        index_file(field_lengths={"1": {"body": "1"}}),
+        index_file(postings={"cat": {}}),
+        index_file(postings={"cat": {"2": {"body": [0]}}}),
+        index_file(postings={"cat": {"1": {"title": [0]}}}),
+        index_file(postings={"cat": {"1": {"body": 0}}}),
+        index_file(postings={"cat": {"1": {"body": [-1]}}}),
+        index_file(postings={"cat": {"1": {"body": [True]}}}),
     ],
 )
 def test_load_rejects_bad_files(tmp_path, content):
@@ -310,10 +476,3 @@ def test_empty_documents_do_not_count_towards_statistics():
     with_empty = make_index("cat dog", "", "dog")
     without = make_index("cat dog", "dog")
     assert with_empty.search("cat")[0].score == pytest.approx(without.search("cat")[0].score)
-
-
-def test_statistics_cache_stays_bounded():
-    index = make_index("cat dog", titles=("cat",))
-    for weight in range(1, MAX_CACHED_WEIGHTINGS * 3):
-        index.search("cat", field_weights={"title": float(weight), "body": 1.0})
-    assert len(index._stats_cache) <= MAX_CACHED_WEIGHTINGS
