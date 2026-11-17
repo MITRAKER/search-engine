@@ -9,12 +9,17 @@ services:
       - discovery.type=single-node      # one node, no cluster
       - xpack.security.enabled=false    # no passwords or TLS: local development only!
       - ES_JAVA_OPTS=-Xms1g -Xmx1g      # cap memory so it runs on a laptop
+      # By default a disk over 90% full stops new indexes from starting (their
+      # status stays red). Fine for a server, confusing on a laptop: turn it off.
+      - cluster.routing.allocation.disk.threshold_enabled=false
     ports:
       - "127.0.0.1:9200:9200"           # reachable from this machine only
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      # The URL is quoted: an unquoted & would run curl in the background and
+      # the check would always pass.
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s'"]
       interval: 10s
       retries: 30
 volumes:

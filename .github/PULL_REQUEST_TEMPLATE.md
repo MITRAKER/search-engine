@@ -12,4 +12,4 @@
 - [ ] New behavior has tests, and coverage stays at 95% or higher
 - [ ] `CHANGELOG.md` is updated under **Unreleased**
 - [ ] `LEARNING.md` or other docs are updated if behavior changed
-- [ ] The code follows the [coding standard](../docs/CODING_STANDARD.md)
+- [ ] The code follows the [coding standard](https://github.com/MITRAKER/search-engine/blob/main/docs/CODING_STANDARD.md)
