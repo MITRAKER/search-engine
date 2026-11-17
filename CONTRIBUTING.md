@@ -34,6 +34,7 @@ or one at a time:
 | Types | `mypy` | type errors, unhandled `None`, wrong arguments |
 | JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, dynamic code |
 | Tests | `pytest --cov` | broken behavior; coverage must stay at 95% or higher |
+| Integration | `make integration` | the two engines disagreeing on a real Elasticsearch (see below) |
 | Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
 
@@ -47,16 +48,34 @@ Some tests compare our output with answers recorded from Elasticsearch
 **Elasticsearch's** answers, not ours, so recording it again never makes a
 failing parity test pass. Record it again only when what goes into it
 changes: the corpus or the cases in `scripts/make_parity_golden.py`, the
-Elasticsearch version, or the Elasticsearch analyzer defined in that script.
-If you change our analyzer, first change that definition to match. If you
-change the scoring on purpose so that it departs from Elasticsearch, the
-parity tests should fail, and the difference needs a documented reason.
+Elasticsearch version, or the index settings and queries in
+`searchengine/es_dsl.py`, which the script uses. If you change our analyzer,
+first change its Elasticsearch copy, `analysis_settings()` in that file, to
+match. If you change the scoring on purpose so that it departs from
+Elasticsearch, the parity tests should fail, and the difference needs a
+documented reason.
 
 ```bash
 docker compose up -d                       # Elasticsearch on localhost:9200
 python scripts/make_parity_golden.py       # rewrites tests/data/es_parity.json
 git diff --stat tests/data                 # review what changed
 ```
+
+### Integration tests
+
+`tests/test_es_integration.py` runs both engines side by side on a real
+Elasticsearch, and checks that they find the same documents with the same
+scores. Without a server these tests are skipped. CI runs them in their own
+job, with `REQUIRE_ES=1`, which turns a missing server into a failure.
+
+```bash
+docker compose up -d          # Elasticsearch on localhost:9200, or set ES_URL
+make integration              # REQUIRE_ES=1 pytest -m integration
+```
+
+To move to a new Elasticsearch version, change the image in both
+`docker-compose.yml` and `.github/workflows/ci.yml` (a test checks that they
+match), then record the golden file again.
 
 ## Making a change
 
