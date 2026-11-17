@@ -1,0 +1,25 @@
+{"id": "1", "title": "Inverted index", "body": "An inverted index maps every term to the list of documents that contain it. Search engines use an inverted index to avoid scanning every document."}
+{"id": "2", "title": "BM25 ranking function", "body": "BM25 is a ranking function that scores documents by term frequency, inverse document frequency and document length. It is the default similarity in Elasticsearch and Lucene."}
+{"id": "3", "title": "TF-IDF", "body": "TF-IDF weighs a term by how often it appears in a document and how rare it is across the collection. It was the classic ranking method before BM25."}
+{"id": "4", "title": "Elasticsearch", "body": "Elasticsearch is a distributed search and analytics engine built on Apache Lucene. It stores JSON documents in indices split into shards and replicas."}
+{"id": "5", "title": "Apache Lucene", "body": "Lucene is a Java library for full text search. It provides indexing, analyzers, query parsing and ranking, and it powers Elasticsearch and Solr."}
+{"id": "6", "title": "Tokenization", "body": "Tokenization splits text into tokens such as words. Analyzers combine a tokenizer with filters for lowercasing, stopwords and stemming."}
+{"id": "7", "title": "Stemming", "body": "Stemming reduces words to a common root so that running, runs and run match each other. The Porter stemmer is a well known algorithm."}
+{"id": "8", "title": "Stopwords", "body": "Stopwords are very common words such as the, and, of. Removing them shrinks the index and reduces noise in ranking."}
+{"id": "9", "title": "Levenshtein distance", "body": "The Levenshtein edit distance counts insertions, deletions and substitutions needed to turn one word into another. Fuzzy search uses it to tolerate typos."}
+{"id": "10", "title": "Precision and recall", "body": "Precision is the share of returned results that are relevant. Recall is the share of relevant documents that were returned."}
+{"id": "11", "title": "nDCG", "body": "Normalized discounted cumulative gain measures ranking quality. Relevant results near the top of the list count more than results further down."}
+{"id": "12", "title": "Sharding", "body": "Sharding splits an index across several machines so a search engine can scale horizontally. Each shard is a self contained Lucene index."}
+{"id": "13", "title": "Autocomplete", "body": "Autocomplete suggests completions while the user types. Elasticsearch offers completion suggesters and edge n-gram analyzers for search as you type."}
+{"id": "14", "title": "Faceted search", "body": "Faceted search lets users filter results by category, price or date. Elasticsearch implements facets with aggregations."}
+{"id": "15", "title": "Phrase queries", "body": "A phrase query matches terms that appear next to each other in order. Positional information stored in the inverted index makes phrase search possible."}
+{"id": "16", "title": "Web crawler", "body": "A web crawler downloads pages, follows links and feeds documents to the indexer. Crawlers must respect robots.txt and rate limits."}
+{"id": "17", "title": "PageRank", "body": "PageRank ranks web pages by the links pointing to them. A link from an important page counts more than a link from an obscure one."}
+{"id": "18", "title": "Vector search", "body": "Vector search finds documents whose embeddings are close to the query embedding. It captures meaning rather than exact words and complements keyword ranking."}
+{"id": "19", "title": "Hybrid search", "body": "Hybrid search combines keyword ranking such as BM25 with vector similarity, often by reciprocal rank fusion, to get the best of both."}
+{"id": "20", "title": "Caching search results", "body": "Search engines cache popular queries and filter results in memory so repeated searches return in milliseconds."}
+{"id": "21", "title": "Cooking pasta", "body": "Boil salted water, add the pasta and stir. Cook until al dente, then drain and toss with sauce."}
+{"id": "22", "title": "Running shoes", "body": "Good running shoes cushion the foot and support long runs. Replace them after several hundred kilometers."}
+{"id": "23", "title": "Search engine optimization", "body": "Search engine optimization improves how a website ranks on public search engines through content, links and page speed."}
+{"id": "24", "title": "Query parsing", "body": "Query parsing turns the text a user types into a structured query with terms, phrases, boolean operators and field filters."}
+{"id": "25", "title": "Relevance tuning", "body": "Relevance tuning adjusts field boosts, synonyms and ranking parameters so the best documents appear first for real user queries."}
