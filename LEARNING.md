@@ -52,7 +52,7 @@ here is backed by a test in `tests/`, so when in doubt, read the test.
 ### Exercises
 
 1. Add a `url` field to a few sample documents. Does anything break? Why not?
-   (Hint: look at `_stored_fields` in `index.py`.)
+   (Hint: look at `normalize_document` in `index.py`.)
 2. Run `pip install -e .` in a fresh virtual environment, then
    `searchengine "stemming"`. Where does the command come from?
    (Hint: `[project.scripts]` in `pyproject.toml`.)
@@ -61,8 +61,9 @@ here is backed by a test in `tests/`, so when in doubt, read the test.
 
 ## Chapter 2: The engine, from scratch
 
-The engine is about 900 lines, half of them comments, across `analyzer.py`,
-`porter.py`, `index.py`, `scoring.py` and `spelling.py`.
+The engine is about 1,200 lines across `analyzer.py`, `porter.py`,
+`index.py`, `scoring.py` and `spelling.py`. About 700 of them are code; the
+rest are the explanations in docstrings and comments.
 
 ### 2.1 Analysis: from text to terms (`analyzer.py`)
 
@@ -75,8 +76,12 @@ Before anything is stored, text goes through a pipeline:
   stem (Porter)     -> runner@1, run@3
 ```
 
-- **Tokenize**: find runs of letters or digits in any script, with the regex
-  `[^\W_]+`, and lowercase them. "café", "2026" and "جستجو" are all tokens.
+- **Tokenize**: find runs of letters, digits and combining marks in any
+  script, and lowercase them. "café", "2026", "جستجو" and "हिन्दी" are all
+  tokens. Combining marks are the accents typed as separate characters, Hindi
+  vowel signs and Arabic vowel marks. They are not letters, but they belong
+  inside the word: a tokenizer that only kept letters would cut "हिन्दी" into
+  pieces.
 - **Stopwords**: drop very common words ("the", "and"). They appear in almost
   every document, so they barely help ranking. We use **Lucene's 33 English
   stopwords**, the exact list Elasticsearch uses.
@@ -89,6 +94,24 @@ Before anything is stored, text goes through a pipeline:
 the query keeps "Running" but the index stored "run", nothing matches. A
 mismatch between index-time and search-time analysis is one of the most
 common Elasticsearch bugs in real projects.
+
+**Matching Lucene to the last character.** Chapter 4 builds the same pipeline
+in Elasticsearch, and the two must produce identical terms. Two details of
+Java, the language Lucene is written in, needed copying:
+
+- *Lowercasing.* Python's `str.lower()` follows Unicode's context rules: a
+  capital sigma at the end of a Greek word becomes the final form "ς", and the
+  Turkish dotted capital "İ" becomes "i" plus a combining dot. Java lowercases
+  one character at a time, with neither rule. So `_lowercase` does the same.
+- *Length.* Tokens longer than 255 characters are dropped, but Java counts
+  length in UTF-16 units, where an emoji or a character such as "𝐀" counts
+  twice. `java_length` counts the same way.
+
+`tests/test_es_parity.py` checks our terms against the ones Elasticsearch
+produced for 17 tricky texts. We also compared every Unicode code point once
+(1,112,032 of them, leaving out surrogates and control codes): the only
+differences were characters added to Unicode after the version that Python's
+own database knows.
 
 ### 2.2 The Porter stemmer (`porter.py`)
 
@@ -186,11 +209,38 @@ length = 3 x length_title + 1 x length_body
 Applying BM25 once (instead of scoring each field and adding the scores) means
 saturation works across fields, so a document cannot win just by repeating a
 word in both. Elasticsearch's `combined_fields` query uses exactly this model.
+Like `combined_fields`, we require every field weight to be at least 1: a
+weight says how many times a word counts, and a word counts at least once.
 
-**Verified against Elasticsearch.** On the sample data, our scores equal
-Elasticsearch 9.5's to 6 decimal places, for single-field queries, phrase
-queries and `combined_fields` queries. (Chapter 4 turns this into an
-automated test.)
+**The statistics, counted the way Lucene counts them.** BM25F needs N, df and
+avgdl for the virtual field, and there is more than one sensible way to count
+them across fields. We follow Lucene's `CombinedFieldQuery`, the code behind
+`combined_fields`:
+
+- **df** is the *largest per-field* df. "apache" in one document's title and
+  in another document's body has df 1, not 2.
+- **N** is the largest per-field number of documents with at least one word
+  in that field. Two empty titles out of three documents do not make N
+  smaller.
+- **avgdl** is the weighted total length divided by N.
+
+**Lengths are stored in one byte.** Lucene keeps each document's field length
+(its *norm*) in a single byte to save memory: 0 to 40 exactly, and above that
+only 4 significant bits. So 41 is stored as 40 and 375 as 344, and BM25 scores
+with the stored value. `lucene_length` in `scoring.py` does the same. With
+several fields Lucene adds up the weighted lengths in 32-bit floats and stores
+the sum in one byte again; the weighted total behind avgdl loses its fraction
+after each field, because Lucene adds it into a whole number. Each detail
+moves the scores of long documents by up to a few percent. If you prefer the
+textbook formula with exact lengths, use `SearchOptions(lucene_norms=False)`.
+
+**Tested against Elasticsearch's own scores.** `tests/test_es_parity.py`
+replays 36 queries on 42 documents (from empty to 1,200 words long, five
+field weightings, AND mode and phrases) and compares every score with the one
+Elasticsearch 9.5.5 gave, recorded by `scripts/make_parity_golden.py`. They
+agree to about 7 significant digits, which is all the precision Lucene's
+32-bit floats have. A second test proves the check can fail: with exact
+lengths, scores move by up to 7%, and the comparison catches it.
 
 ### 2.5 Query features
 
@@ -200,7 +250,8 @@ automated test.)
   in the same field, every term sits at the right distance from the first.
   For the query `"inverted the index"` the distances are 0 and 2, gap included.
   Phrases are scored like Lucene does: tf is the **number of times the whole
-  phrase occurs**, and idf is the sum of the terms' idfs.
+  phrase occurs**, and idf is the sum of the terms' idfs. On one field this is
+  exactly Elasticsearch's `match_phrase` score (the golden test checks it).
 - **Typo tolerance** (`fuzzy=True`): for each query word the index does not
   know, find the known word with the smallest **Levenshtein distance** (the
   fewest letters inserted, deleted or substituted). `edit_distance` uses
@@ -208,9 +259,11 @@ automated test.)
   distance must exceed the limit. Like Elasticsearch's `"fuzziness": "AUTO"`,
   we allow 0 typos in words of 1 or 2 letters, 1 in words of 3 to 5, and 2 in
   longer words. We correct the **surface** words people type ("rankng" to
-  "ranking"), not the stems, because that is where typos happen. Ties go to
-  the more frequent word, then alphabetical order, so results never depend on
-  the order documents were added.
+  "ranking"), not the stems, because that is where typos happen. A
+  correction must be a word found in the fields being searched, so a search
+  of the body never "corrects" a word into one that only titles contain. Ties
+  go to the more frequent word, then alphabetical order, so results never
+  depend on the order documents were added.
 - **"Did you mean"** (`suggest`): the same correction, shown instead of applied.
 - **`explain(query, doc_id)`**: lists each clause's idf, tf and contribution.
   The parts always add up to the score (there is a test for that too).
@@ -236,6 +289,7 @@ searchengine '"search engine"'
 searchengine '"inverted the index"'           # no results: the gap matters
 searchengine --explain "bm25 ranking"
 searchengine --ranker tfidf "ranking"
+searchengine --data missing.jsonl "ranking"   # one-line error, exit status 1
 ```
 
 ### Interview questions you can now answer
@@ -251,6 +305,10 @@ searchengine --ranker tfidf "ranking"
   words become different terms and never match.
 - *How would you handle typos?* Edit distance against the vocabulary, limited
   by word length, with the cheap length filter applied first.
+- *Why could two correct BM25 implementations disagree?* The formula leaves
+  room for choices: how df and N are counted across fields, how document
+  lengths are stored (Lucene rounds them into one byte), and the precision of
+  the arithmetic (Lucene uses 32-bit floats).
 
 ### Exercises
 
@@ -265,6 +323,9 @@ searchengine --ranker tfidf "ranking"
 5. `SpellingIndex.correct` compares against every word of similar length.
    How would you make it fast for a million words? (Look up BK-trees and
    SymSpell.)
+6. Change `lucene_length` to return `length` unchanged and run
+   `pytest tests/test_es_parity.py`. Which documents fail? Why are they all
+   longer than 40 words?
 
 ---
 
@@ -285,6 +346,7 @@ locally with `make check`.
 | Types | `mypy --strict` | calling `.lower()` on something that might be `None` |
 | Coding standard | `scripts/check_jpl.py` | recursion, `while True`, a 70-line function |
 | Tests | pytest + coverage | a broken ranking; untested branches |
+| Hygiene | pre-commit hooks | trailing spaces, a merge conflict marker, a 5 MB file, a private key |
 | Properties | Hypothesis | a crash on some odd Unicode input nobody thought of |
 | Dependencies | pip-audit, Dependabot | a library version with a known vulnerability |
 | Security | CodeQL, ruff's bandit rules | unsafe calls, injection risks, risky workflow settings |
@@ -307,13 +369,16 @@ Python and names the tool that enforces it. The short version:
    consonant mask in one loop.
 2. **Every loop has a bound.** No `while True`, and every input that drives a
    loop has a size limit: text length, token length, query terms, results.
-3. **No unbounded memory growth.** Even our statistics cache has a cap.
+3. **No unbounded memory growth.** Files are read one line at a time, and a
+   line may be at most 10 MB; result lists are capped (1,000 hits, 50
+   spelling candidates).
 4. **Short functions.** At most 60 lines and complexity 10.
 5. **Check for the impossible.** Every public function validates its inputs
    with clear errors; `assert` only guards internal invariants.
 6. **Smallest scope.** No global state; constants are `Final` and immutable.
 7. **Check every result.** `mypy --strict` makes you handle `None`; saved
-   index files are validated before they are trusted.
+   index files are validated before they are trusted; the command line turns
+   bad input into a one-line error instead of a traceback.
 8. **No runtime code generation.** No `eval` or `exec`.
 9. **Simple indirection.** No `getattr` with computed names; a static call graph.
 10. **Zero warnings, analyzed daily.** Any warning fails the tests, and CI
@@ -359,7 +424,14 @@ New feature: bump minor. Bug fix: bump patch.
   (`test_phrase_respects_word_order`).
 - **Hand calculations**: `test_bm25f_score_matches_hand_calculation` computes
   the expected score on paper, independently of `scoring.py`.
-- **Golden (oracle) tests**: Elasticsearch's stems for 3,107 words.
+- **Golden (oracle) tests**: Elasticsearch's stems for 3,107 words, its terms
+  for 17 tricky texts, and its scores for 36 queries.
+- **Reference ports**: `test_scoring.py` ports Lucene's `SmallFloat` line by
+  line, and checks our two-line `lucene_length` against it on every length
+  up to 5,000 and on random ones up to 2^31.
+- **Testing the test**: a golden test only helps if it can fail.
+  `test_exact_lengths_do_not_match_elasticsearch` shows that a plausible
+  mistake (exact lengths) is caught.
 - **Property-based tests** with Hypothesis: instead of one example, state a
   rule ("search never crashes and every score is positive") and let the
   library generate hundreds of inputs to break it.

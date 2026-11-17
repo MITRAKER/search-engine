@@ -15,9 +15,12 @@ Elasticsearch. Then the two are benchmarked against each other on a real
 information-retrieval dataset.
 
 **Highlight:** the from-scratch engine reproduces Elasticsearch 9.5's BM25
-scores to 6 decimal places, including phrase queries and multi-field
-`combined_fields` (BM25F) queries. Its Porter stemmer matches Elasticsearch's
-on all 36,007 words tested.
+scores to 7 significant digits, for short and long documents (it rounds
+lengths into one byte exactly as Lucene does), phrase queries and multi-field
+`combined_fields` (BM25F) queries. A golden-file test checks this on every
+run. Its tokenizer gives Elasticsearch's terms down to Unicode casing and
+combining marks, and its Porter stemmer matches Elasticsearch's on all
+36,007 words tested.
 
 > 📘 **Learning as you go?** [LEARNING.md](LEARNING.md) explains every step:
 > what was built, why, the concepts and math behind it, interview questions
@@ -73,7 +76,8 @@ Every pull request must pass:
 - **Coding standard**: [NASA/JPL "Power of Ten" rules adapted to Python](docs/CODING_STANDARD.md),
   checked by a custom static analyzer ([`scripts/check_jpl.py`](scripts/check_jpl.py))
 - **Tests**: pytest and Hypothesis property tests on Python 3.11 to 3.14,
-  coverage at least 95% (currently 100%), zero warnings allowed
+  golden-file tests against Elasticsearch's own output, coverage at least 95%
+  (currently 100%), zero warnings allowed
 - **Security**: CodeQL, `pip-audit`, Dependabot, dependency review, Actions pinned by SHA
 - **Packaging**: the wheel is built, installed in a clean environment and run
 
@@ -92,7 +96,7 @@ searchengine/
   datasets.py    JSON Lines and SciFact loaders
   cli.py         command line
   data/          25-document sample dataset
-scripts/         JPL rule checker, release notes
+scripts/         JPL rule checker, golden-file recorder, release notes
 tests/           unit, property-based and golden-file tests (Elasticsearch as the oracle)
 docs/            coding standard
 ```

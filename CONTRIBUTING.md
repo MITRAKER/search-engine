@@ -34,10 +34,23 @@ or one at a time:
 | Types | `mypy` | type errors, unhandled `None`, wrong arguments |
 | JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, dynamic code |
 | Tests | `pytest --cov` | broken behavior; coverage must stay at 95% or higher |
+| Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
 
 Code must follow the [coding standard](docs/CODING_STANDARD.md), our
 adaptation of NASA/JPL's "Power of Ten" rules.
+
+### Golden files
+
+Some tests compare our output with answers recorded from Elasticsearch, so
+they run without it. If you change the analyzer or the scoring on purpose,
+record the answers again and review the difference before committing:
+
+```bash
+docker compose up -d                       # Elasticsearch on localhost:9200
+python scripts/make_parity_golden.py       # rewrites tests/data/es_parity.json
+git diff --stat tests/data
+```
 
 ## Making a change
 
