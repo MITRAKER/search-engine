@@ -26,7 +26,9 @@ CASES = GOLDEN["cases"]
 
 # Lucene computes scores in 32-bit floats, which carry about 7 significant
 # digits. Every score here agrees to better than 2e-7; a wrong length or
-# statistic shows up as a difference of 1e-3 or more.
+# statistic shows up as a difference of 1e-3 or more. (The documents here are
+# at most about 4 times the average length. Far longer ones lose digits in
+# Lucene's own float arithmetic: about 1e-6 at 20 times the average.)
 TOLERANCE = 1e-6
 
 

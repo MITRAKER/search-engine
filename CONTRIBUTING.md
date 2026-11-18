@@ -42,14 +42,20 @@ adaptation of NASA/JPL's "Power of Ten" rules.
 
 ### Golden files
 
-Some tests compare our output with answers recorded from Elasticsearch, so
-they run without it. If you change the analyzer or the scoring on purpose,
-record the answers again and review the difference before committing:
+Some tests compare our output with answers recorded from Elasticsearch
+(`tests/data/es_parity.json`), so they run without it. The file holds
+**Elasticsearch's** answers, not ours, so recording it again never makes a
+failing parity test pass. Record it again only when what goes into it
+changes: the corpus or the cases in `scripts/make_parity_golden.py`, the
+Elasticsearch version, or the Elasticsearch analyzer defined in that script.
+If you change our analyzer, first change that definition to match. If you
+change the scoring on purpose so that it departs from Elasticsearch, the
+parity tests should fail, and the difference needs a documented reason.
 
 ```bash
 docker compose up -d                       # Elasticsearch on localhost:9200
 python scripts/make_parity_golden.py       # rewrites tests/data/es_parity.json
-git diff --stat tests/data
+git diff --stat tests/data                 # review what changed
 ```
 
 ## Making a change

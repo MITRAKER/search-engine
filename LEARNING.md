@@ -238,9 +238,11 @@ textbook formula with exact lengths, use `SearchOptions(lucene_norms=False)`.
 replays 36 queries on 42 documents (from empty to 1,200 words long, five
 field weightings, AND mode and phrases) and compares every score with the one
 Elasticsearch 9.5.5 gave, recorded by `scripts/make_parity_golden.py`. They
-agree to about 7 significant digits, which is all the precision Lucene's
-32-bit floats have. A second test proves the check can fail: with exact
-lengths, scores move by up to 7%, and the comparison catches it.
+agree to better than 2 parts in 10 million, about all the precision Lucene's
+32-bit floats have. (For a document many times longer than average, Lucene's
+own 32-bit arithmetic loses a few more digits: about 1 part in a million at
+20 times the average length.) A second test proves the check can fail: with
+exact lengths, scores move by up to 7%, and the comparison catches it.
 
 ### 2.5 Query features
 
@@ -250,8 +252,10 @@ lengths, scores move by up to 7%, and the comparison catches it.
   in the same field, every term sits at the right distance from the first.
   For the query `"inverted the index"` the distances are 0 and 2, gap included.
   Phrases are scored like Lucene does: tf is the **number of times the whole
-  phrase occurs**, and idf is the sum of the terms' idfs. On one field this is
-  exactly Elasticsearch's `match_phrase` score (the golden test checks it).
+  phrase occurs**, and idf is the sum of the terms' idfs. On one field with
+  weight 1 this is exactly Elasticsearch's `match_phrase` score (the golden
+  test checks it). With other weights, or several fields, Elasticsearch
+  scores phrases its own way, so the scores differ.
 - **Typo tolerance** (`fuzzy=True`): for each query word the index does not
   know, find the known word with the smallest **Levenshtein distance** (the
   fewest letters inserted, deleted or substituted). `edit_distance` uses

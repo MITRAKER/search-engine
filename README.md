@@ -15,12 +15,13 @@ Elasticsearch. Then the two are benchmarked against each other on a real
 information-retrieval dataset.
 
 **Highlight:** the from-scratch engine reproduces Elasticsearch 9.5's BM25
-scores to 7 significant digits, for short and long documents (it rounds
-lengths into one byte exactly as Lucene does), phrase queries and multi-field
-`combined_fields` (BM25F) queries. A golden-file test checks this on every
-run. Its tokenizer gives Elasticsearch's terms down to Unicode casing and
-combining marks, and its Porter stemmer matches Elasticsearch's on all
-36,007 words tested.
+scores, typically to 7 significant digits: word queries over several weighted
+fields (BM25F, Elasticsearch's `combined_fields`) and phrases on one field.
+It even stores document lengths in one byte, the way Lucene does. A
+golden-file test checks this on every run. Its tokenizer gives
+Elasticsearch's terms down to Unicode casing, combining marks and letters
+beyond U+FFFF, and its Porter stemmer matches Elasticsearch's on all 36,007
+words tested.
 
 > 📘 **Learning as you go?** [LEARNING.md](LEARNING.md) explains every step:
 > what was built, why, the concepts and math behind it, interview questions
