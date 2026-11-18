@@ -1,0 +1,140 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "searchengine-from-scratch"
+dynamic = ["version"]
+description = "A search engine built from scratch (inverted index, BM25F, phrase and fuzzy search) and benchmarked against Elasticsearch."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mitra Kermanian" }]
+requires-python = ">=3.11"
+keywords = ["search-engine", "information-retrieval", "bm25", "inverted-index", "elasticsearch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+# The from-scratch engine needs nothing outside the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "coverage[toml]>=7.10",
+    "hypothesis>=6.140",
+    "mypy>=2.0",
+    "pip-audit>=2.9",
+    "pre-commit>=4.3",
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+    "ruff>=0.17",
+]
+
+[project.scripts]
+searchengine = "searchengine.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/MITRAKER/search-engine"
+Changelog = "https://github.com/MITRAKER/search-engine/blob/main/CHANGELOG.md"
+Issues = "https://github.com/MITRAKER/search-engine/issues"
+
+[tool.hatch.version]
+path = "searchengine/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["searchengine"]
+
+# ---------------------------------------------------------------- ruff ----
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["searchengine/data"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes: unused names, undefined names
+    "I",        # import sorting
+    "N",        # naming conventions
+    "UP",       # modern Python syntax
+    "B",        # bugbear: likely bugs
+    "A",        # shadowing builtins
+    "C4",       # comprehensions
+    "C90",      # McCabe complexity (JPL rule 4)
+    "SIM",      # simplifications
+    "RET",      # return statements
+    "ARG",      # unused arguments
+    "PTH",      # pathlib over os.path
+    "PL",       # pylint rules
+    "PERF",     # performance anti-patterns
+    "S",        # bandit security rules
+    "T20",      # stray print() calls
+    "ERA",      # commented-out code
+    "PT",       # pytest style
+    "RUF",      # ruff's own rules
+]
+ignore = [
+    "S101",     # assert: allowed for internal invariants (JPL rule 5, see docs/CODING_STANDARD.md)
+    "PLR2004",  # magic values: tests and formulas read better with literal numbers
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 7
+max-branches = 12
+max-returns = 6
+max-statements = 40
+
+[tool.ruff.lint.per-file-ignores]
+"searchengine/cli.py" = ["T201"]  # a CLI prints on purpose
+"scripts/*.py" = ["T201"]
+"tests/*.py" = ["ARG", "PLR0913", "S"]
+
+# ---------------------------------------------------------------- mypy ----
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["searchengine", "scripts", "tests"]
+
+[[tool.mypy.overrides]]
+# Test functions take pytest fixtures and need no annotations, but their
+# bodies are still type-checked.
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+
+# -------------------------------------------------------------- pytest ----
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+# JPL rule 10: zero warnings. Any warning fails the test run.
+filterwarnings = ["error"]
+markers = ["integration: needs a running Elasticsearch (set ES_URL)"]
+
+# ------------------------------------------------------------ coverage ----
+[tool.coverage.run]
+branch = true
+source = ["searchengine"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
