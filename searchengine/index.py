@@ -191,7 +191,8 @@ def split_phrase(query: str) -> tuple[str, bool]:
     return text, False
 
 
-def _check_options(options: SearchOptions) -> None:
+def check_options(options: SearchOptions) -> None:
+    """Check a SearchOptions: a known ranker and mode, and sane BM25 parameters."""
     if not isinstance(options, SearchOptions):
         raise TypeError("options must be a SearchOptions")
     if options.ranker not in ("bm25", "tfidf"):
@@ -527,7 +528,7 @@ class InvertedIndex:
     ) -> tuple[list[Clause], dict[str, float], SearchOptions]:
         """Check the arguments and match the query: what search and explain share."""
         options = SearchOptions() if options is None else options
-        _check_options(options)
+        check_options(options)
         weights = resolve_field_weights(self.fields, field_weights)
         parsed = self.parse(query, fuzzy=options.fuzzy, fields=weights)
         return self._clauses(parsed, weights), weights, options

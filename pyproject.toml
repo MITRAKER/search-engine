@@ -29,7 +29,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# The Elasticsearch engine (milestone 3): pip install -e ".[es]"
+es = ["elasticsearch>=9.0,<10"]
 dev = [
+    "searchengine-from-scratch[es]",
     "coverage[toml]>=7.10",
     "hypothesis>=6.140",
     "mypy>=2.0",
