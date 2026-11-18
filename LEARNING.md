@@ -108,7 +108,7 @@ Java, the language Lucene is written in, needed copying:
   twice. `java_length` counts the same way.
 
 `tests/test_es_parity.py` checks our terms against the ones Elasticsearch
-produced for 17 tricky texts. We also compared every Unicode code point once
+produced for 19 tricky texts. We also compared every Unicode code point once
 (1,112,032 of them, leaving out surrogates and control codes): the only
 differences were characters added to Unicode after the version that Python's
 own database knows.
@@ -144,6 +144,11 @@ final -e.
 `tests/data/porter_golden.json`, so the test runs without Elasticsearch.
 This kind of test, where a trusted system provides the expected answers, is
 called an **oracle** or **golden** test.
+
+One detail came from a later review: Lucene's stemmer works on Java's UTF-16
+units, so a letter beyond U+FFFF, such as "𝐛", counts as two consonants. Our
+stemmer does the same for words that contain one, so "bo𝐛ing" becomes
+"bo𝐛" in both engines.
 
 ### 2.3 The inverted index (`index.py`)
 
@@ -429,7 +434,7 @@ New feature: bump minor. Bug fix: bump patch.
 - **Hand calculations**: `test_bm25f_score_matches_hand_calculation` computes
   the expected score on paper, independently of `scoring.py`.
 - **Golden (oracle) tests**: Elasticsearch's stems for 3,107 words, its terms
-  for 17 tricky texts, and its scores for 36 queries.
+  for 19 tricky texts, and its scores for 36 queries.
 - **Reference ports**: `test_scoring.py` ports Lucene's `SmallFloat` line by
   line, and checks our two-line `lucene_length` against it on every length
   up to 5,000 and on random ones up to 2^31.

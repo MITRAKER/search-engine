@@ -3,7 +3,7 @@
 tests/data/es_parity.json holds 42 documents with short, long and empty
 fields, 36 queries (single words, several words, AND mode, phrases, five
 field weightings) and the scores Elasticsearch 9.5.5 gave them. It also holds
-the terms Elasticsearch's copy of our analyzer made from 17 tricky texts.
+the terms Elasticsearch's copy of our analyzer made from 19 tricky texts.
 scripts/make_parity_golden.py recorded it from a real Elasticsearch, so these
 tests need no server.
 
