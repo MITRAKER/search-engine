@@ -18,15 +18,20 @@ repos:
         args: [--maxkb=1024, --enforce-all] # every file, not only newly added ones (CI)
       - id: detect-private-key
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.5
-    hooks:
-      - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
-
+  # The tools below run from your environment, at the versions pinned in
+  # requirements-dev.txt, so the hooks and CI always run the same versions.
   - repo: local
     hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --fix
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types_or: [python, pyi]
       - id: mypy
         name: mypy (strict type checks)
         entry: mypy
