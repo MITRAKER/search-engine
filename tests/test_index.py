@@ -455,13 +455,26 @@ def test_index_file_helper_makes_a_valid_file(tmp_path):
         index_file(field_lengths={"1": {"body": 0}}),
         index_file(field_lengths={"1": {"body": 2}}),
         index_file(field_lengths={"1": {"body": 2}}, postings={"cat": {"1": {"body": [3, 1]}}}),
-        "[" * 100_000 + "]" * 100_000,  # too deep for the json module
+        # Too deep for json, or, where the stack is large enough to parse it
+        # (Python 3.14 measures it), not an index: an error either way.
+        "[" * 100_000 + "]" * 100_000,
     ],
 )
 def test_load_rejects_bad_files(tmp_path, content):
     path = tmp_path / "bad.json"
     path.write_text(content)
     with pytest.raises(ValueError, match=r"index file|corrupt"):
+        InvertedIndex.load(path)
+
+
+def test_load_reports_json_too_deep_for_the_stack(tmp_path, monkeypatch):
+    def too_deep(text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    path = tmp_path / "index.json"
+    path.write_text("{}")
+    monkeypatch.setattr(json, "loads", too_deep)
+    with pytest.raises(ValueError, match="the JSON is nested too deeply"):
         InvertedIndex.load(path)
 
 

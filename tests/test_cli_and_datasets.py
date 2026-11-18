@@ -74,7 +74,10 @@ def test_cli_rejects_a_bad_result_count(capsys):
         (None, "No such file"),
         ('{"id": "1"}\n{"id": \n', ":2: invalid JSON"),
         (b'{"id": "\xff"}\n', ":1: not valid UTF-8"),
-        ("[" * 100_000 + "]" * 100_000 + "\n", ":1: the JSON is nested too deeply"),
+        # Too deep for json on most machines ("nested too deeply"), but Python
+        # 3.14 measures the real stack and may parse it, and then the line is
+        # not an object. Either way: one clear line that says where.
+        ("[" * 100_000 + "]" * 100_000 + "\n", "docs.jsonl:1: "),
     ],
 )
 def test_cli_reports_bad_data_in_one_line(tmp_path, capsys, contents, message):
@@ -93,6 +96,19 @@ def test_cli_reports_bad_data_in_one_line(tmp_path, capsys, contents, message):
 def test_cli_reports_an_overlong_query(capsys):
     assert main([" ".join(["word"] * (MAX_QUERY_TERMS + 1))]) == 1
     assert "limited" in capsys.readouterr().err
+
+
+def test_load_jsonl_reports_json_too_deep_for_the_stack(tmp_path, monkeypatch):
+    # How deep json can go depends on the Python version and the stack size,
+    # so make it give up the way it does when it runs out.
+    def too_deep(text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    path = tmp_path / "docs.jsonl"
+    path.write_text('{"id": "1"}\n')
+    monkeypatch.setattr(json, "loads", too_deep)
+    with pytest.raises(ValueError, match=r"docs\.jsonl:1: the JSON is nested too deeply"):
+        list(load_jsonl(path))
 
 
 def test_load_jsonl_says_where_the_json_is_broken(tmp_path):
