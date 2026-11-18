@@ -18,6 +18,7 @@ Elasticsearch's ``combined_fields`` query runs, so both give the same scores.
 from __future__ import annotations
 
 import heapq
+import itertools
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
-from .analyzer import Token, analyze_tokens, is_searchable, tokenize
+from .analyzer import MAX_TEXT_LENGTH, Token, analyze_tokens, is_searchable, tokenize
 from .porter import porter_stem
 from .scoring import (
     DEFAULT_B,
@@ -48,7 +49,7 @@ DEFAULT_FIELD_WEIGHTS: Final[Mapping[str, float]] = MappingProxyType({"title": 3
 MAX_FIELDS: Final = 32
 # Field weights must be at least 1, as in Elasticsearch's combined_fields: a
 # weight multiplies how often a word counts, and a word counts at least once.
-# The upper bound keeps every weighted length well inside a 32-bit float.
+# The upper bound keeps every weighted length finite in a 32-bit float.
 MIN_FIELD_WEIGHT: Final = 1.0
 MAX_FIELD_WEIGHT: Final = 1000.0
 MAX_RESULTS: Final = 1000
@@ -208,7 +209,8 @@ def _corrupt(path: str | Path, what: str) -> ValueError:
 
 
 def _is_count(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    """A whole number that a text of at most MAX_TEXT_LENGTH characters can have."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_TEXT_LENGTH
 
 
 def _check_index_data(data: object, path: str | Path) -> dict[str, Any]:
@@ -251,9 +253,22 @@ def _check_documents(
             raise _corrupt(path, f"document {doc_id!r} has a length that is not a count")
 
 
+def _good_positions(positions: object) -> bool:
+    """A non-empty list of positions, each a count, in increasing order."""
+    return (
+        isinstance(positions, list)
+        and bool(positions)
+        and all(_is_count(position) for position in positions)
+        and all(a < b for a, b in itertools.pairwise(positions))
+    )
+
+
 def _check_postings(
     postings: dict[str, Any], lengths: dict[str, Any], fields: set[str], path: str | Path
 ) -> None:
+    """Check every posting, and that each field's length is the number of its
+    positions: a file that disagrees with itself would fail later, in scoring."""
+    counted: dict[tuple[str, str], int] = {}
     for term, docs in postings.items():
         if not isinstance(docs, dict) or not docs:
             raise _corrupt(path, f"term {term!r} has no documents")
@@ -261,10 +276,13 @@ def _check_postings(
             if doc_id not in lengths or not isinstance(by_field, dict) or not by_field:
                 raise _corrupt(path, f"term {term!r} points to unknown document {doc_id!r}")
             for field, positions in by_field.items():
-                if field not in fields or not isinstance(positions, list) or not positions:
+                if field not in fields or not _good_positions(positions):
                     raise _corrupt(path, f"term {term!r} has bad positions in {doc_id!r}")
-                if not all(_is_count(position) for position in positions):
-                    raise _corrupt(path, f"term {term!r} has a position that is not a count")
+                counted[doc_id, field] = counted.get((doc_id, field), 0) + len(positions)
+    for doc_id, doc_lengths in lengths.items():
+        for field, length in doc_lengths.items():
+            if counted.get((doc_id, field), 0) != length:
+                raise _corrupt(path, f"document {doc_id!r}: {field!r} length does not match")
 
 
 class InvertedIndex:
@@ -582,7 +600,11 @@ class InvertedIndex:
     @classmethod
     def load(cls, path: str | Path) -> InvertedIndex:
         """Read an index written by ``save``, checking all of it first."""
-        data = _check_index_data(json.loads(Path(path).read_text(encoding="utf-8")), path)
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except RecursionError as error:  # json gives up on very deep nesting this way
+            raise _corrupt(path, "the JSON is nested too deeply") from error
+        data = _check_index_data(raw, path)
         index = cls(data["fields"])
         index.docs = data["docs"]
         index.field_lengths = data["field_lengths"]

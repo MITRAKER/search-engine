@@ -65,6 +65,9 @@ ANALYZER_TEXTS: Final = (
     BOLD_A * 127 + " kept",  # 254 UTF-16 units
     BOLD_A * 128 + " dropped",  # 256 UTF-16 units
     "x" * 255 + " " + "y" * 256 + " end",
+    # Letters beyond U+FFFF are two UTF-16 units, and Lucene's stemmer counts units.
+    "\N{CJK UNIFIED IDEOGRAPH-20BB7}s " + BOLD_A + "s bo\N{MATHEMATICAL BOLD SMALL B}ing",
+    "ha" + "\N{MATHEMATICAL BOLD SMALL B}" * 2 + "ing",
 )
 WEIGHTINGS: Final = (
     {"title": 3.0, "body": 1.0},

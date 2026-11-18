@@ -40,6 +40,8 @@ def load_jsonl(path: str | Path = SAMPLE) -> Iterator[dict[str, Any]]:
                 raise ValueError(f"{path}:{number}: not valid UTF-8") from error
             except json.JSONDecodeError as error:
                 raise ValueError(f"{path}:{number}: invalid JSON: {error.msg}") from error
+            except RecursionError as error:  # json gives up on very deep nesting this way
+                raise ValueError(f"{path}:{number}: the JSON is nested too deeply") from error
             if record is None:
                 continue
             if not isinstance(record, dict):

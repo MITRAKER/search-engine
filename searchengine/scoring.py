@@ -25,6 +25,8 @@ DEFAULT_B: Final = 0.75
 # Lucene's one-byte length encoding (SmallFloat.intToByte4) keeps 0 to 23 as
 # they are, then stores (length - 24) with 4 significant bits.
 _EXACT_NORMS: Final = 24
+# The largest Java int: Lucene rounds a weighted document length into one.
+JAVA_INT_MAX: Final = 2**31 - 1
 
 
 def _check_counts(n: float, df: float) -> None:
@@ -135,7 +137,8 @@ def lucene_weighted_length(lengths: Mapping[str, int], weights: Mapping[str, flo
     for field in sorted(weights):
         weighted = float32(float32(weights[field]) * lucene_length(lengths[field]))
         total = float32(total + weighted)
-    return lucene_length(math.floor(total + 0.5))
+    # Lucene rounds with Java's Math.round, whose int result stops at 2**31 - 1.
+    return lucene_length(min(math.floor(total + 0.5), JAVA_INT_MAX))
 
 
 def lucene_weighted_total(totals: Mapping[str, int], weights: Mapping[str, float]) -> int:

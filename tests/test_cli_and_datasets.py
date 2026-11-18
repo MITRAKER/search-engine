@@ -74,6 +74,7 @@ def test_cli_rejects_a_bad_result_count(capsys):
         (None, "No such file"),
         ('{"id": "1"}\n{"id": \n', ":2: invalid JSON"),
         (b'{"id": "\xff"}\n', ":1: not valid UTF-8"),
+        ("[" * 100_000 + "]" * 100_000 + "\n", ":1: the JSON is nested too deeply"),
     ],
 )
 def test_cli_reports_bad_data_in_one_line(tmp_path, capsys, contents, message):

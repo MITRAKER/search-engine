@@ -77,6 +77,22 @@ def test_measure(stem, m):
     assert measure(stem) == m
 
 
+@pytest.mark.parametrize(
+    ("word", "stem"),
+    [
+        ("\U00020bb7s", "\U00020bb7"),
+        ("\U0001d41as", "\U0001d41a"),
+        ("bo\U0001d41bing", "bo\U0001d41b"),
+        ("ha\U0001d41b\U0001d41bing", "ha\U0001d41b\U0001d41b"),
+    ],
+)
+def test_a_letter_beyond_u_ffff_counts_as_two_units_like_in_java(word, stem):
+    """Elasticsearch's own stems for these words. A Java string holds UTF-16
+    units, so a bold math letter plus "s" is three units long, and two bold
+    b's are four units with no double consonant at the end."""
+    assert porter_stem(word) == stem
+
+
 @pytest.mark.parametrize("word", ["", "a", "is", "xy"])
 def test_short_words_unchanged(word):
     assert porter_stem(word) == word

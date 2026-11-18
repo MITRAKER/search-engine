@@ -446,6 +446,16 @@ def test_index_file_helper_makes_a_valid_file(tmp_path):
         index_file(postings={"cat": {"1": {"body": 0}}}),
         index_file(postings={"cat": {"1": {"body": [-1]}}}),
         index_file(postings={"cat": {"1": {"body": [True]}}}),
+        # Numbers no text of MAX_TEXT_LENGTH characters can have would
+        # overflow later, in scoring.
+        index_file(field_lengths={"1": {"body": 10**39}}),
+        index_file(postings={"cat": {"1": {"body": [10**12]}}}),
+        # A file must agree with itself: a field's length is its number of
+        # positions, and positions only go up.
+        index_file(field_lengths={"1": {"body": 0}}),
+        index_file(field_lengths={"1": {"body": 2}}),
+        index_file(field_lengths={"1": {"body": 2}}, postings={"cat": {"1": {"body": [3, 1]}}}),
+        "[" * 100_000 + "]" * 100_000,  # too deep for the json module
     ],
 )
 def test_load_rejects_bad_files(tmp_path, content):

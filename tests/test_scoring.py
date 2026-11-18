@@ -6,6 +6,7 @@ from hypothesis import strategies as st
 
 from searchengine import bm25_idf, bm25_tf, tfidf_idf, tfidf_tf
 from searchengine.scoring import (
+    JAVA_INT_MAX,
     check_bm25_params,
     float32,
     lucene_length,
@@ -184,6 +185,17 @@ def test_weighted_length_is_summed_in_32_bit_floats():
     # The rounded sum is then stored in one byte, like any length. Title 19
     # and body 277 (stored as 264) give a hair under 375.5: 375, stored as 344.
     assert lucene_weighted_length({"title": 19, "body": 277}, weights) == 344
+
+
+def test_weighted_length_stops_at_the_largest_java_int():
+    """Lucene rounds the weighted length with Java's Math.round, whose int
+    result stops at 2**31 - 1, so a longer length is stored like that one."""
+    biggest = lucene_length(JAVA_INT_MAX)
+    assert biggest == 2_013_265_944
+    # 2,400,001 words are stored as 2,359,320; times 1000 that passes 2**31 - 1.
+    assert lucene_weighted_length({"body": 2_400_001}, {"body": 1000.0}) == biggest
+    # 2,000,000 words are stored as 1,966,104; times 1000 that stays below it.
+    assert lucene_weighted_length({"body": 2_000_000}, {"body": 1000.0}) == 1_879_048_216
 
 
 def test_weighted_length_ignores_fields_without_a_weight():

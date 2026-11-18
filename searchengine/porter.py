@@ -20,6 +20,7 @@ words: "rate" keeps its "-ate", but "activate" becomes "activ".
 
 from __future__ import annotations
 
+import struct
 from typing import Final
 
 _VOWELS: Final = frozenset("aeiou")
@@ -183,8 +184,7 @@ def _step5(w: str) -> str:
     return w
 
 
-def porter_stem(word: str) -> str:
-    """Stem one lowercase word. Words of one or two letters are left alone."""
+def _stem_units(word: str) -> str:
     if len(word) <= 2:
         return word
     w = _step1c(_step1ab(word))
@@ -193,3 +193,20 @@ def porter_stem(word: str) -> str:
         w = _apply_first_match(w, _STEP3.get(w[-1], ()))
         w = _step4(w)
     return _step5(w)
+
+
+def porter_stem(word: str) -> str:
+    """Stem one lowercase word. Words of one or two letters are left alone.
+
+    Lucene stems a Java string, which holds UTF-16 code units, and a letter
+    beyond U+FFFF (like the bold math letters) is two of them. So such a word
+    is stemmed as its code units too, as two "consonants" for each of those
+    letters, and the pairs are joined back into letters afterwards.
+    """
+    if word.isascii() or max(word) <= "\uffff":
+        return _stem_units(word)
+    data = word.encode("utf-16-le", "surrogatepass")
+    units = "".join(chr(unit) for unit in struct.unpack(f"<{len(data) // 2}H", data))
+    return (
+        _stem_units(units).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+    )
