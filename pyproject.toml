@@ -45,6 +45,7 @@ dev = [
 
 [project.scripts]
 searchengine = "searchengine.cli:main"
+searchengine-bench = "searchengine.benchmark:main"
 
 [project.urls]
 Homepage = "https://github.com/MITRAKER/search-engine"
@@ -102,6 +103,7 @@ max-statements = 40
 
 [tool.ruff.lint.per-file-ignores]
 "searchengine/cli.py" = ["T201"]  # a CLI prints on purpose
+"searchengine/benchmark.py" = ["T201"]  # so does the benchmark's
 "scripts/*.py" = ["T201"]
 "tests/*.py" = ["ARG", "PLR0913", "S"]
 

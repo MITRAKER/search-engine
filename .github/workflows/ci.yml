@@ -135,6 +135,47 @@ jobs:
       - name: The command line on Elasticsearch
         run: searchengine --engine es --reindex "inverted index" -k 1 | grep "Inverted index"
 
+  benchmark:
+    name: SciFact benchmark (quality must not change)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      elasticsearch:
+        # The same image as docker-compose.yml (tests/test_repo_config.py checks).
+        image: elasticsearch:9.5.5@sha256:b7b0f24e9b5e90656ffe69804b3a48907499ab2b9cd67f02b7af3aff1b026a89
+        env:
+      ES_URL: http://localhost:9200
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            pyproject.toml
+      - name: Install
+        run: python -m pip install -c requirements-dev.txt -e ".[dev]"
+      - name: Both engines on SciFact, compared with benchmarks/scifact.json
+        # SciFact is downloaded and checked against its pinned sha256. Any
+        # quality score that moves fails the job: when a change is meant to
+        # move one, record the report again (CONTRIBUTING.md). Speed is
+        # reported, not checked, because it depends on the machine. The
+        # tables go to the job's summary page.
+        run: >-
+          searchengine-bench --scifact datasets/scifact --download --engine both
+          --check benchmarks/scifact.json --json benchmark.json
+          --markdown "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scifact-benchmark
+          path: benchmark.json
+          retention-days: 30
+
   security:
     name: Dependency vulnerability audit
     runs-on: ubuntu-latest

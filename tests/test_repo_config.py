@@ -15,12 +15,20 @@ def compose_image() -> str:
 
 
 def test_ci_tests_against_the_same_elasticsearch_as_local_development():
-    """Dependabot updates docker-compose.yml, not the CI service: keep them in step."""
+    """Dependabot updates docker-compose.yml, not the CI services: keep them in step."""
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
-    assert f"image: {compose_image()}" in ci
+    images = re.findall(r"^\s+image: (\S+)$", ci, re.M)
+    assert len(images) == 2  # the integration tests and the benchmark
+    assert set(images) == {compose_image()}
 
 
 def test_the_golden_file_was_recorded_with_that_elasticsearch():
     golden = json.loads((ROOT / "tests" / "data" / "es_parity.json").read_text("utf-8"))
     version = compose_image().split(":")[1].split("@")[0]
     assert golden["elasticsearch"] == version
+
+
+def test_the_recorded_benchmark_was_run_on_that_elasticsearch():
+    report = json.loads((ROOT / "benchmarks" / "scifact.json").read_text("utf-8"))
+    version = compose_image().split(":")[1].split("@")[0]
+    assert report["environment"]["elasticsearch"] == version

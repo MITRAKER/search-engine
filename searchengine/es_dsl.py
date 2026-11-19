@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from .analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH, Token, analyze_tokens, is_searchable
 from .index import (
@@ -47,6 +47,8 @@ MAX_FACETS: Final = 50
 MAX_CATEGORY_LENGTH: Final = 256  # characters
 MAX_EXPLAIN_LINES: Final = 200
 HIGHLIGHT_TAGS: Final = ("<mark>", "</mark>")
+# BEIR's Elasticsearch baseline: best_fields, with half the score of the other fields.
+BEST_FIELDS_TIE_BREAKER: Final = 0.5
 _FIELD_NAME: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
@@ -125,10 +127,20 @@ def index_settings(k1: float = DEFAULT_K1, b: float = DEFAULT_B) -> dict[str, An
 # ---------- queries ----------
 
 
-def build_query(query: str, options: SearchOptions, weights: Mapping[str, float]) -> dict[str, Any]:
+QueryType = Literal["combined_fields", "best_fields"]
+
+
+def build_query(
+    query: str,
+    options: SearchOptions,
+    weights: Mapping[str, float],
+    query_type: QueryType = "combined_fields",
+) -> dict[str, Any]:
     """Translate a query and its options into Elasticsearch's query DSL.
 
-    * words      -> ``combined_fields``: BM25F, the same scores as our engine
+    * words      -> ``combined_fields``: BM25F, the same scores as our engine.
+      With ``query_type="best_fields"``, a field-centric ``multi_match``
+      instead: each field scored on its own (for comparison, in benchmarks)
     * "a phrase" -> ``multi_match`` of type ``phrase``: on one field, the same
       score as ours; on several, the best field's score
     * fuzzy      -> one fuzzy ``multi_match`` per word, joined by ``bool``
@@ -136,6 +148,8 @@ def build_query(query: str, options: SearchOptions, weights: Mapping[str, float]
     ``weights`` must already be checked (``index.resolve_field_weights``).
     """
     check_options(options)
+    if query_type not in ("combined_fields", "best_fields"):
+        raise ValueError("query_type must be combined_fields or best_fields")
     if options.ranker != "bm25":
         raise ValueError("the Elasticsearch engine ranks with BM25 only")
     if not options.lucene_norms:
@@ -153,6 +167,16 @@ def build_query(query: str, options: SearchOptions, weights: Mapping[str, float]
         return {"multi_match": {"query": text, "type": "phrase", "fields": fields}}
     if options.fuzzy:
         return _fuzzy_query(tokens, fields, options.mode)
+    if query_type == "best_fields":
+        return {
+            "multi_match": {
+                "query": text,
+                "type": "best_fields",
+                "fields": fields,
+                "operator": options.mode,  # "and": every word in the SAME field
+                "tie_breaker": BEST_FIELDS_TIE_BREAKER,
+            }
+        }
     return {"combined_fields": {"query": text, "fields": fields, "operator": options.mode}}
 
 
@@ -170,6 +194,11 @@ def _fuzzy_query(tokens: list[Token], fields: list[str], mode: str) -> dict[str,
     return {"bool": {"must" if mode == "and" else "should": words}}
 
 
+def _check_k(k: int) -> None:
+    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= MAX_RESULTS:
+        raise ValueError(f"k must be an int between 1 and {MAX_RESULTS}")
+
+
 def build_search_body(
     query: Mapping[str, Any], k: int, fields: Iterable[str], category: str | None
 ) -> dict[str, Any]:
@@ -179,8 +208,7 @@ def build_search_body(
     are counted. So the facets still count every category the query matches,
     and a user can switch to another category without searching again.
     """
-    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= MAX_RESULTS:
-        raise ValueError(f"k must be an int between 1 and {MAX_RESULTS}")
+    _check_k(k)
     body: dict[str, Any] = {
         "query": dict(query),
         "size": k,
@@ -198,6 +226,16 @@ def build_search_body(
             raise ValueError(f"category must be a str of 1 to {MAX_CATEGORY_LENGTH} characters")
         body["post_filter"] = {"term": {FACET_FIELD: category}}
     return body
+
+
+def build_rank_body(query: Mapping[str, Any], k: int) -> dict[str, Any]:
+    """A lean request that only ranks: ids and scores, for benchmarks.
+
+    No document text, snippets, facets or exact count: each costs time, and
+    a benchmark of ranking should time the ranking alone.
+    """
+    _check_k(k)
+    return {"query": dict(query), "size": k, "source": False, "track_total_hits": False}
 
 
 def autocomplete_query(prefix: str) -> dict[str, Any]:
