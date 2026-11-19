@@ -96,16 +96,20 @@ mismatch between index-time and search-time analysis is one of the most
 common Elasticsearch bugs in real projects.
 
 **Matching Lucene to the last character.** Chapter 4 builds the same pipeline
-in Elasticsearch, and the two must produce identical terms. Two details of
-Java, the language Lucene is written in, needed copying:
+in Elasticsearch, and the two must produce identical terms. Three details of
+Lucene, which is written in Java, needed copying:
 
-- *Lowercasing.* Python's `str.lower()` follows Unicode's context rules: a
+- *Lowercasing.* Python's `str.lower()` follows Unicode's full rules: a
   capital sigma at the end of a Greek word becomes the final form "ς", and the
-  Turkish dotted capital "İ" becomes "i" plus a combining dot. Java lowercases
-  one character at a time, with neither rule. So `_lowercase` does the same.
+  Turkish dotted capital "İ" becomes "i" plus a combining dot. Java's own
+  `String.toLowerCase` does exactly the same. But Lucene's `LowerCaseFilter`
+  lowercases one character at a time with `Character.toLowerCase`, Unicode's
+  simple mapping, so neither rule applies. `_lowercase` does the same.
 - *Length.* Tokens longer than 255 characters are dropped, but Java counts
   length in UTF-16 units, where an emoji or a character such as "𝐀" counts
   twice. `java_length` counts the same way.
+- *Stemming.* Lucene's stemmer counts UTF-16 units too. Section 2.2 shows
+  what that changes.
 
 `tests/test_es_parity.py` checks our terms against the ones Elasticsearch
 produced for 19 tricky texts. We also compared every Unicode code point once
@@ -156,8 +160,8 @@ A book's index says "Lucene: pages 12, 48". An inverted index does the same
 for terms, and also records the field and position of every occurrence:
 
 ```
-postings["invert"] = {"1":  {"title": [0], "body": [1, 12]},
-                      "15": {"body": [9]}}
+postings["invert"] = {"1":  {"title": [0], "body": [1, 18]},
+                      "15": {"body": [18]}}
           term        doc id  field    positions
 ```
 
@@ -230,9 +234,10 @@ them across fields. We follow Lucene's `CombinedFieldQuery`, the code behind
 - **avgdl** is the weighted total length divided by N.
 
 **Lengths are stored in one byte.** Lucene keeps each document's field length
-(its *norm*) in a single byte to save memory: 0 to 40 exactly, and above that
-only 4 significant bits. So 41 is stored as 40 and 375 as 344, and BM25 scores
-with the stored value. `lucene_length` in `scoring.py` does the same. With
+(its *norm*) in a single byte to save memory. Lengths 0 to 23 are stored as
+they are. Above that, Lucene keeps 4 significant bits of (length - 24), so 24
+to 40 also survive exactly, 41 becomes 24 + 16 = 40, and 375 becomes
+24 + 320 = 344. BM25 scores with the stored value. `lucene_length` in `scoring.py` does the same. With
 several fields Lucene adds up the weighted lengths in 32-bit floats and stores
 the sum in one byte again; the weighted total behind avgdl loses its fraction
 after each field, because Lucene adds it into a whole number. Each detail
@@ -345,15 +350,19 @@ covers the safety net that catches mistakes before they reach `main`.
 
 ### 3.1 The quality gates
 
-Every pull request runs all of these in GitHub Actions. You can run them
-locally with `make check`.
+Every pull request runs all of these in GitHub Actions. `make check` runs
+most of them on your machine (lint, format, types, the coding standard, the
+tests and the hygiene hooks, on one Python version), and `make audit` runs
+the dependency audit. The other Python versions, the packaging test, CodeQL
+and GitHub's dependency review run only in CI, and Dependabot checks for new
+versions once a week.
 
 | Gate | Tool | Example of what it catches |
 |---|---|---|
 | Lint | ruff, 20 rule sets | an unused variable, a mutable default argument, `assert` on a tuple |
 | Format | ruff format | inconsistent quotes and line breaks (it fixes them) |
 | Types | `mypy --strict` | calling `.lower()` on something that might be `None` |
-| Coding standard | `scripts/check_jpl.py` | recursion, `while True`, a 70-line function |
+| Coding standard | `scripts/check_jpl.py` | recursion, `while True`, a 70-line function, a module-level cache |
 | Tests | pytest + coverage | a broken ranking; untested branches |
 | Hygiene | pre-commit hooks | trailing spaces, a merge conflict marker, a 5 MB file, a private key |
 | Properties | Hypothesis | a crash on some odd Unicode input nobody thought of |
@@ -376,19 +385,24 @@ Python and names the tool that enforces it. The short version:
 1. **No recursion.** Our Porter stemmer first decided whether a "y" is a
    vowel by calling itself on the previous letter. It now computes a
    consonant mask in one loop.
-2. **Every loop has a bound.** No `while True`, and every input that drives a
-   loop has a size limit: text length, token length, query terms, results.
-3. **No unbounded memory growth.** Files are read one line at a time, and a
-   line may be at most 10 MB; result lists are capped (1,000 hits, 50
-   spelling candidates).
+2. **Every loop has a bound.** No `while True` (nor a loop over
+   `itertools.count()`), and every input that drives a loop has a size
+   limit: text length, token length, query length, results.
+3. **No unbounded memory growth.** Data files are read one line at a time,
+   and a line may be at most 10 MB. A saved index is read whole, so its file
+   may be at most 500 MB. Result lists are capped (1,000 hits, 50 spelling
+   candidates).
 4. **Short functions.** At most 60 lines and complexity 10.
 5. **Check for the impossible.** Every public function validates its inputs
    with clear errors; `assert` only guards internal invariants.
-6. **Smallest scope.** No global state; constants are `Final` and immutable.
+6. **Smallest scope.** No global state: every module-level name is `Final`,
+   and shared tables are frozen (`tuple`, `frozenset`, `MappingProxyType`).
 7. **Check every result.** `mypy --strict` makes you handle `None`; saved
    index files are validated before they are trusted; the command line turns
    bad input into a one-line error instead of a traceback.
-8. **No runtime code generation.** No `eval` or `exec`.
+8. **No runtime code generation.** No `eval`, `exec` or dynamic imports, and
+   no monkey-patching. Tests use pytest's `monkeypatch`, which undoes every
+   change when the test ends.
 9. **Simple indirection.** No `getattr` with computed names; a static call graph.
 10. **Zero warnings, analyzed daily.** Any warning fails the tests, and CI
     runs every day even when nobody pushes.
@@ -397,8 +411,13 @@ Python and names the tool that enforces it. The short version:
 **abstract syntax tree** (the `ast` module). The checker walks that tree:
 function length is `end_lineno - lineno + 1`; `while True` is a `While` node
 whose test is a true constant; recursion is found by building a **call graph**
-(which function calls which) and searching it for cycles. It has its own
-tests, including one that runs it on this project's code.
+(which function calls which, looking names up the way Python does, so a
+nested helper that calls itself is found) and searching it for cycles. One
+file cannot show everything: a call through an object passed in as an
+argument, or into another module, is left to code review, and the checker's
+docstring says so. Its tests show both sides for each rule: code it must
+catch, and code it must leave alone, because a checker that cries wolf gets
+switched off. One test runs it on this project's code.
 
 ### 3.3 CI/CD with GitHub Actions
 
@@ -413,8 +432,11 @@ pull request, schedule, tag) and *what* to run (`jobs:`, each a list of
   keeps the pins up to date.
 - **Reproducible installs**: `requirements-dev.txt` pins every tool to an
   exact version, so CI behaves the same today and next month.
-- **Daily schedule**: catches new vulnerabilities and breaking dependency
-  releases even when the code did not change.
+- **Daily schedule**: the tools are pinned, so a run on unchanged code
+  installs exactly the same packages. What it catches is what changes
+  outside the repository: newly published vulnerabilities, new Python patch
+  releases and new runner images. New versions of the tools arrive as
+  Dependabot pull requests, where CI tests them first.
 - **Packaging test**: the wheel is built, installed in an empty environment
   and actually run.
 
@@ -453,7 +475,7 @@ New feature: bump minor. Bug fix: bump patch.
 make install                     # once: tools and git hooks
 git switch -c feat/my-change     # never work on main
 # ... edit, then:
-make check                       # the same gates as CI
+make check                       # most of the CI gates (see 3.1)
 git commit -m "feat: add synonym expansion"   # Conventional Commits
 git push -u origin feat/my-change             # then open a pull request
 ```

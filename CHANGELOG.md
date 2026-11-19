@@ -27,8 +27,9 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     corrects to words in the searched fields, and "did you mean" suggestions.
   - `explain()`, which breaks a score down term by term.
   - Save and load the index as JSON, with every loaded file validated.
-  - Limits on every input: text and token length, query terms, results,
-    fields, document ids and JSON Lines line size.
+  - Limits on every input: text and token length, query length and terms,
+    results, fields, document ids, JSON Lines line size and index file size.
+    Every public function checks its arguments.
 - Command-line interface: `searchengine "query"` with `--fuzzy`, `--explain`,
   `--ranker`, `--mode` and `-k`. Bad input gives a one-line error.
 - 25-document sample dataset, and a loader for the SciFact benchmark.

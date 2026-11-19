@@ -1,7 +1,9 @@
 # Continuous integration: every push and pull request must pass all of these
-# checks before it can be merged. It also runs once a day, so a new bug in a
-# dependency or a new security advisory is caught even when nobody pushes
-# (NASA/JPL rule 10: analyze the code every day).
+# checks before it can be merged. It also runs once a day, even when nobody
+# pushes (NASA/JPL rule 10: analyze the code every day). The tools are pinned,
+# so a daily run catches what changes outside the repository: newly published
+# vulnerabilities (pip-audit), new Python patch releases and new runner images.
+# New versions of the tools arrive as Dependabot pull requests, tested here.
 name: CI
 
 on:

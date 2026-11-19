@@ -19,20 +19,24 @@ pre-commit install                 # run the checks before every commit
 
 ## The checks
 
-CI runs all of these on every pull request. Run them locally first:
+Run the main checks locally before you push:
 
 ```bash
-make check
+make check   # lint, format, types, JPL rules, tests and hygiene
+make audit   # dependencies with known vulnerabilities
 ```
 
-or one at a time:
+`make check` uses one Python version. CI also runs the tests on Python 3.11
+to 3.14, builds and installs the package, and runs CodeQL and GitHub's
+dependency review, so a pull request can still fail on something `make check`
+passed. To run the checks one at a time:
 
 | Check | Command | What it catches |
 |---|---|---|
 | Lint | `ruff check .` | likely bugs, unused code, security smells |
 | Format | `ruff format .` | inconsistent style (it fixes it for you) |
 | Types | `mypy` | type errors, unhandled `None`, wrong arguments |
-| JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, dynamic code |
+| JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, shared state, dynamic code |
 | Tests | `pytest --cov` | broken behavior; coverage must stay at 95% or higher |
 | Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
