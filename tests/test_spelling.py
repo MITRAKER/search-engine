@@ -1,8 +1,11 @@
+from collections.abc import Callable
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from searchengine import SpellingIndex, edit_distance, max_edits_auto
+from searchengine.spelling import MAX_WORD_LENGTH
 
 
 def reference_distance(a: str, b: str) -> int:
@@ -32,9 +35,43 @@ def test_edit_distance_stops_at_the_limit():
     assert edit_distance("a", "abcdef", limit=2) == 3
 
 
-def test_edit_distance_rejects_negative_limit():
+@pytest.mark.parametrize("limit", [-1, 1.5, True, None])
+def test_edit_distance_rejects_bad_limits(limit):
     with pytest.raises(ValueError, match="limit"):
-        edit_distance("a", "b", limit=-1)
+        edit_distance("a", "b", limit=limit)
+
+
+@pytest.mark.parametrize("bad", [None, 3, b"word"])
+def test_words_must_be_text(bad):
+    spelling = SpellingIndex()
+    calls: list[Callable[[], object]] = [
+        lambda: edit_distance(bad, "word"),
+        lambda: edit_distance("word", bad),
+        lambda: max_edits_auto(bad),
+        lambda: spelling.add(bad),
+        lambda: spelling.candidates(bad),
+        lambda: spelling.correct(bad),
+    ]
+    for call in calls:
+        with pytest.raises(TypeError, match="must be a str"):
+            call()
+
+
+def test_word_length_is_bounded_like_tokens():
+    """No indexed word is longer than the longest token, which also bounds
+    the work edit_distance does."""
+    longest = "a" * MAX_WORD_LENGTH
+    too_long = longest + "a"
+    assert edit_distance(longest, longest) == 0
+    for a, b in ((too_long, "a"), ("a", too_long)):
+        with pytest.raises(ValueError, match="limited"):
+            edit_distance(a, b)
+    spelling = make_spelling("search")
+    with pytest.raises(ValueError, match="limited"):
+        spelling.add(too_long)
+    assert spelling.counts == {"search": 1}
+    assert spelling.candidates(too_long) == []
+    assert spelling.correct(too_long) == too_long
 
 
 @given(st.text(max_size=8), st.text(max_size=8), st.integers(min_value=0, max_value=4))
@@ -79,10 +116,29 @@ def test_from_counts_round_trip():
     assert spelling.correct("serch") == "search"
 
 
-@pytest.mark.parametrize("counts", [{"word": 0}, {"word": "3"}])
+@pytest.mark.parametrize(
+    "counts", [{"word": 0}, {"word": "3"}, {"word": True}, {"a" * (MAX_WORD_LENGTH + 1): 1}, {3: 1}]
+)
 def test_from_counts_rejects_bad_entries(counts):
-    with pytest.raises(ValueError, match="invalid"):
+    with pytest.raises(ValueError, match="invalid spelling entry"):
         SpellingIndex.from_counts(counts)
+
+
+@pytest.mark.parametrize("counts", [None, [("word", 1)], "word"])
+def test_from_counts_needs_a_mapping(counts):
+    with pytest.raises(TypeError, match="mapping"):
+        SpellingIndex.from_counts(counts)
+
+
+@pytest.mark.parametrize("count", [0, -1, 1.5, True, "2"])
+def test_add_rejects_bad_counts_without_changing_anything(count):
+    spelling = make_spelling("word")
+    with pytest.raises(ValueError, match="count"):
+        spelling.add("word", count)
+    with pytest.raises(ValueError, match="count"):
+        spelling.add("other", count)
+    assert spelling.counts == {"word": 1}
+    assert spelling.candidates("other") == []
 
 
 def test_candidates_come_best_first():

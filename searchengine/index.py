@@ -1,9 +1,10 @@
 """An inverted index with BM25F and TF-IDF ranking, built from scratch.
 
-An inverted index maps each term to the documents that contain it, and where:
+An inverted index maps each term to the documents that contain it, and where
+(this is the sample data's):
 
-    postings["invert"] = {"1": {"title": [0], "body": [1, 12]},
-                          "15": {"body": [9]}}
+    postings["invert"] = {"1": {"title": [0], "body": [1, 18]},
+                          "15": {"body": [18]}}
               term        doc id   field     positions in that field
 
 Searching means: look up each query term, collect its documents and score
@@ -24,41 +25,51 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeAlias
 
-from .analyzer import MAX_TEXT_LENGTH, Token, analyze_tokens, is_searchable, tokenize
+from .analyzer import (
+    MAX_TEXT_LENGTH,
+    MAX_TOKEN_LENGTH,
+    Token,
+    analyze_tokens,
+    is_searchable,
+    tokenize,
+)
 from .porter import porter_stem
 from .scoring import (
     DEFAULT_B,
     DEFAULT_K1,
+    MAX_FIELD_WEIGHT,
+    MIN_FIELD_WEIGHT,
+    _bm25_tf,
+    _lucene_weighted_length,
     bm25_idf,
-    bm25_tf,
     check_bm25_params,
-    lucene_weighted_length,
     lucene_weighted_total,
     tfidf_idf,
     tfidf_tf,
 )
 from .spelling import SpellingIndex
 
-Ranker = Literal["bm25", "tfidf"]
-Mode = Literal["or", "and"]
+Ranker: TypeAlias = Literal["bm25", "tfidf"]
+Mode: TypeAlias = Literal["or", "and"]
 
 DEFAULT_FIELDS: Final = ("title", "body")
 DEFAULT_FIELD_WEIGHTS: Final[Mapping[str, float]] = MappingProxyType({"title": 3.0, "body": 1.0})
 MAX_FIELDS: Final = 32
-# Field weights must be at least 1, as in Elasticsearch's combined_fields: a
-# weight multiplies how often a word counts, and a word counts at least once.
-# The upper bound keeps every weighted length finite in a 32-bit float.
-MIN_FIELD_WEIGHT: Final = 1.0
-MAX_FIELD_WEIGHT: Final = 1000.0
 MAX_RESULTS: Final = 1000
 MAX_QUERY_TERMS: Final = 64
+# Room for MAX_QUERY_TERMS words of the longest kind. Checked before any
+# analysis, so a huge query costs nothing before it is rejected.
+MAX_QUERY_LENGTH: Final = MAX_QUERY_TERMS * (MAX_TOKEN_LENGTH + 1)
+# An index file is read whole, so its size is capped. Parsed, it takes about
+# twelve times this much memory.
+MAX_INDEX_BYTES: Final = 500_000_000
 MAX_DOC_ID_LENGTH: Final = 512  # Elasticsearch's limit for _id, in bytes
 FORMAT_VERSION: Final = 2
 
 # term -> doc id -> field -> positions
-Postings = dict[str, dict[str, dict[str, list[int]]]]
+Postings: TypeAlias = dict[str, dict[str, dict[str, list[int]]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,10 +192,16 @@ def resolve_field_weights(
     return weights
 
 
-def split_phrase(query: str) -> tuple[str, bool]:
-    """Strip the quotes off a "quoted phrase": (text, whether it was quoted)."""
+def _check_query(query: object) -> None:
     if not isinstance(query, str):
         raise TypeError("query must be a str")
+    if len(query) > MAX_QUERY_LENGTH:
+        raise ValueError(f"queries are limited to {MAX_QUERY_LENGTH} characters")
+
+
+def split_phrase(query: str) -> tuple[str, bool]:
+    """Strip the quotes off a "quoted phrase": (text, whether it was quoted)."""
+    _check_query(query)
     text = query.strip()
     if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         return text[1:-1], True
@@ -198,7 +215,25 @@ def _check_options(options: SearchOptions) -> None:
         raise ValueError(f"unknown ranker {options.ranker!r}")
     if options.mode not in ("or", "and"):
         raise ValueError(f"unknown mode {options.mode!r}")
+    if not isinstance(options.fuzzy, bool) or not isinstance(options.lucene_norms, bool):
+        raise TypeError("fuzzy and lucene_norms must be True or False")
     check_bm25_params(options.k1, options.b)
+
+
+def check_field_names(fields: Iterable[str]) -> tuple[str, ...]:
+    """Check a collection of field names and return it as a tuple.
+
+    At most MAX_FIELDS + 1 names are read, so even an endless iterable is
+    rejected quickly.
+    """
+    if isinstance(fields, str):
+        raise TypeError("fields must be a list of field names, not one string")
+    names = tuple(itertools.islice(fields, MAX_FIELDS + 1))
+    if not all(isinstance(field, str) and field for field in names):
+        raise TypeError("every field name must be a non-empty str")
+    if not 0 < len(set(names)) == len(names) <= MAX_FIELDS:
+        raise ValueError(f"fields must be 1 to {MAX_FIELDS} distinct names")
+    return names
 
 
 # ---------- checking a saved index before trusting it ----------
@@ -289,13 +324,7 @@ class InvertedIndex:
     """Index documents, then search them."""
 
     def __init__(self, fields: Iterable[str] = DEFAULT_FIELDS) -> None:
-        if isinstance(fields, str):
-            raise TypeError("fields must be a list of field names, not one string")
-        self.fields: tuple[str, ...] = tuple(fields)
-        if not all(isinstance(field, str) and field for field in self.fields):
-            raise TypeError("every field name must be a non-empty str")
-        if not 0 < len(set(self.fields)) == len(self.fields) <= MAX_FIELDS:
-            raise ValueError(f"fields must be 1 to {MAX_FIELDS} distinct names")
+        self.fields: tuple[str, ...] = check_field_names(fields)
         self.postings: Postings = {}
         self.field_lengths: dict[str, dict[str, int]] = {}  # doc -> field -> terms
         self.docs: dict[str, dict[str, str]] = {}
@@ -371,7 +400,7 @@ class InvertedIndex:
         """The document's weighted length, as Lucene stores it or exact."""
         lengths = self.field_lengths[doc_id]
         if lucene_norms:
-            return float(lucene_weighted_length(lengths, weights))
+            return float(_lucene_weighted_length(lengths, weights))
         return sum(lengths[field] * weight for field, weight in weights.items())
 
     def _term_stats(self, term: str, weights: Mapping[str, float]) -> tuple[dict[str, float], int]:
@@ -411,11 +440,14 @@ class InvertedIndex:
         is replaced by the closest word that is.
         """
         text, phrase = split_phrase(query)
+        searched = self.fields if fields is None else check_field_names(fields)
+        unknown = set(searched) - set(self.fields)
+        if unknown:
+            raise ValueError(f"unknown fields {sorted(unknown)}; fields are {list(self.fields)}")
         tokens = analyze_tokens(text)
         if len(tokens) > MAX_QUERY_TERMS:
             raise ValueError(f"queries are limited to {MAX_QUERY_TERMS} terms")
         if fuzzy:
-            searched = self.fields if fields is None else tuple(fields)
             tokens = [self._correct_token(token, searched) for token in tokens]
         return ParsedQuery(tuple(tokens), phrase)
 
@@ -430,6 +462,7 @@ class InvertedIndex:
 
     def suggest(self, query: str) -> str | None:
         """'Did you mean ...?' The corrected query, or None if nothing changed."""
+        _check_query(query)
         words = tokenize(query)
         if sum(1 for word in words if is_searchable(word)) > MAX_QUERY_TERMS:
             raise ValueError(f"queries are limited to {MAX_QUERY_TERMS} terms")
@@ -520,7 +553,7 @@ class InvertedIndex:
         if options.ranker == "tfidf":
             return tfidf_tf(tf)
         dl = self._doc_length(doc_id, weights, options.lucene_norms)
-        return bm25_tf(tf, dl, avgdl, options.k1, options.b)
+        return _bm25_tf(tf, dl, avgdl, options.k1, options.b)
 
     def _prepare(
         self, query: str, options: SearchOptions | None, field_weights: Mapping[str, float] | None
@@ -565,8 +598,9 @@ class InvertedIndex:
     ) -> list[ClauseScore]:
         """Break one document's score down by query clause. Great for learning.
 
-        The parts add up to the document's score in ``search``. A document
-        that ``search`` would not return gets an empty list.
+        The parts add up to the document's score in ``search``, whether or
+        not the document makes the top k. A document that does not match the
+        query (in AND mode: not every word of it) gets an empty list.
         """
         doc_id = normalize_doc_id(doc_id)
         clauses, weights, options = self._prepare(query, options, field_weights)
@@ -599,9 +633,20 @@ class InvertedIndex:
 
     @classmethod
     def load(cls, path: str | Path) -> InvertedIndex:
-        """Read an index written by ``save``, checking all of it first."""
+        """Read an index written by ``save``, checking all of it first.
+
+        The file is read whole, so it may be at most ``MAX_INDEX_BYTES`` long.
+        """
+        with Path(path).open("rb") as file:
+            content = file.read(MAX_INDEX_BYTES + 1)  # never more than the limit
+        if len(content) > MAX_INDEX_BYTES:
+            raise ValueError(f"{path} is larger than {MAX_INDEX_BYTES} bytes")
         try:
-            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            raw = json.loads(content.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise _corrupt(path, "not valid UTF-8") from error
+        except json.JSONDecodeError as error:
+            raise _corrupt(path, f"invalid JSON: {error.msg}") from error
         except RecursionError as error:  # json gives up on very deep nesting this way
             raise _corrupt(path, "the JSON is nested too deeply") from error
         data = _check_index_data(raw, path)

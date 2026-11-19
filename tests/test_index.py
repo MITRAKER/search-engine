@@ -1,5 +1,7 @@
+import itertools
 import json
 import math
+from collections.abc import Callable
 
 import pytest
 from hypothesis import given, settings
@@ -7,12 +9,14 @@ from hypothesis import strategies as st
 
 from searchengine import InvertedIndex, SearchOptions
 from searchengine.index import (
-    MAX_FIELD_WEIGHT,
     MAX_FIELDS,
+    MAX_QUERY_LENGTH,
     MAX_QUERY_TERMS,
     MAX_RESULTS,
-    MIN_FIELD_WEIGHT,
+    check_field_names,
+    split_phrase,
 )
+from searchengine.scoring import MAX_FIELD_WEIGHT, MIN_FIELD_WEIGHT
 from tests.helpers import make_index
 
 # ---------- indexing ----------
@@ -278,6 +282,57 @@ def test_query_must_be_text(sample_index):
         sample_index.search(42)
 
 
+@pytest.mark.parametrize("query", [42, None, b"cat", ["cat"]])
+def test_every_way_in_checks_the_query_is_text(sample_index, query):
+    calls: list[Callable[[], object]] = [
+        lambda: sample_index.search(query),
+        lambda: sample_index.parse(query),
+        lambda: sample_index.suggest(query),
+        lambda: sample_index.explain(query, "1"),
+        lambda: split_phrase(query),
+    ]
+    for call in calls:
+        with pytest.raises(TypeError, match="query must be a str"):
+            call()
+
+
+def test_query_text_is_bounded_before_any_analysis(sample_index):
+    too_long = "a" * (MAX_QUERY_LENGTH + 1)
+    for call in (sample_index.search, sample_index.parse, sample_index.suggest):
+        with pytest.raises(ValueError, match=f"limited to {MAX_QUERY_LENGTH} characters"):
+            call(too_long)
+    assert sample_index.search("a" * MAX_QUERY_LENGTH) == []  # one token, too long to index
+
+
+@pytest.mark.parametrize(
+    "options",
+    [SearchOptions(fuzzy="yes"), SearchOptions(lucene_norms=1)],  # type: ignore[arg-type]
+)
+def test_switches_must_be_true_or_false(sample_index, options):
+    with pytest.raises(TypeError, match="True or False"):
+        sample_index.search("search", options=options)
+
+
+def test_parse_checks_the_fields_it_is_given(sample_index):
+    with pytest.raises(ValueError, match="unknown fields"):
+        sample_index.parse("search", fields=["summary"])
+    with pytest.raises(TypeError, match="not one string"):
+        sample_index.parse("search", fields="body")
+    assert [token.term for token in sample_index.parse("search", fields=["body"]).tokens] == [
+        "search"
+    ]
+
+
+def test_field_names_are_read_lazily():
+    """At most MAX_FIELDS + 1 names are taken, so a huge or endless
+    iterable is turned away at once."""
+    with pytest.raises(ValueError, match="fields"):
+        check_field_names(itertools.repeat("body"))
+    with pytest.raises(ValueError, match="fields"):
+        check_field_names(f"f{number}" for number in range(10**12))
+    assert check_field_names(iter(["title", "body"])) == ("title", "body")
+
+
 # ---------- phrases ----------
 
 
@@ -476,6 +531,27 @@ def test_load_reports_json_too_deep_for_the_stack(tmp_path, monkeypatch):
     monkeypatch.setattr(json, "loads", too_deep)
     with pytest.raises(ValueError, match="the JSON is nested too deeply"):
         InvertedIndex.load(path)
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"), [(b"\xff\xfe{}", "not valid UTF-8"), (b'{"format": 2,', "invalid JSON")]
+)
+def test_load_reports_files_that_are_not_json(tmp_path, content, problem):
+    path = tmp_path / "index.json"
+    path.write_bytes(content)
+    with pytest.raises(ValueError, match=f"is corrupt: {problem}"):
+        InvertedIndex.load(path)
+
+
+def test_load_refuses_a_file_over_the_size_limit(tmp_path, monkeypatch):
+    path = tmp_path / "index.json"
+    path.write_text(index_file())
+    size = path.stat().st_size
+    monkeypatch.setattr("searchengine.index.MAX_INDEX_BYTES", size - 1)
+    with pytest.raises(ValueError, match=f"larger than {size - 1} bytes"):
+        InvertedIndex.load(path)
+    monkeypatch.setattr("searchengine.index.MAX_INDEX_BYTES", size)
+    assert [hit.doc_id for hit in InvertedIndex.load(path).search("cat")] == ["1"]
 
 
 def test_stats(sample_index):

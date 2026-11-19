@@ -8,7 +8,7 @@ from .spelling import SpellingIndex, edit_distance, max_edits_auto
 
 __version__ = "0.1.0"
 
-__all__ = [
+__all__ = (
     "ENGLISH_STOPWORDS",
     "ClauseScore",
     "Hit",
@@ -27,4 +27,4 @@ __all__ = [
     "tfidf_idf",
     "tfidf_tf",
     "tokenize",
-]
+)

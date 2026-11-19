@@ -94,19 +94,28 @@ def _check_text(text: str) -> None:
 def _lowercase(word: str) -> str:
     """Lowercase one character at a time, as Lucene does.
 
-    Python's ``str.lower()`` follows Unicode's special rules: a capital sigma
-    at the end of a word becomes the final-form sigma, and the dotted capital
-    I (U+0130) becomes "i" plus a combining dot. Java lowercases each
-    character on its own, with neither rule, and our terms must match
-    Elasticsearch's exactly.
+    Lucene's ``LowerCaseFilter`` lowercases each character on its own, with
+    Java's ``Character.toLowerCase``: Unicode's simple one-to-one mapping.
+    Python's ``str.lower()``, like Java's ``String.toLowerCase``, applies the
+    full rules instead: a capital sigma at the end of a word becomes the
+    final-form sigma, and the dotted capital I (U+0130) becomes "i" plus a
+    combining dot. Lowercasing one character at a time leaves out the sigma
+    rule, and the dotted I is the one special case left, so it is mapped by
+    hand. Our terms must match Elasticsearch's exactly.
     """
     if word.isascii():
         return word.lower()
     return "".join("i" if char == "İ" else char.lower() for char in word)
 
 
+def _check_word(word: object) -> None:
+    if not isinstance(word, str):
+        raise TypeError(f"a word must be a str, not {type(word).__name__}")
+
+
 def java_length(word: str) -> int:
     """Length in UTF-16 code units, the way Java (and so Lucene) counts."""
+    _check_word(word)
     if word.isascii():
         return len(word)
     return len(word.encode("utf-16-le")) // 2
@@ -114,6 +123,7 @@ def java_length(word: str) -> int:
 
 def is_searchable(word: str) -> bool:
     """Whether a lowercase token survives analysis: not a stopword, not too long."""
+    _check_word(word)
     return word not in ENGLISH_STOPWORDS and java_length(word) <= MAX_TOKEN_LENGTH
 
 

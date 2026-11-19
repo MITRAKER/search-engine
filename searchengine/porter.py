@@ -21,6 +21,8 @@ words: "rate" keeps its "-ate", but "activate" becomes "activ".
 from __future__ import annotations
 
 import struct
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 _VOWELS: Final = frozenset("aeiou")
@@ -113,40 +115,46 @@ def _step1c(w: str) -> str:
 # Step 2 maps double suffixes to single ones (-ization = -ize + -ation).
 # Rules are grouped by the second-to-last letter, like the reference
 # implementation, and only the first suffix that matches in a group is tried.
-_STEP2: Final[dict[str, tuple[tuple[str, str], ...]]] = {
-    "a": (("ational", "ate"), ("tional", "tion")),
-    "c": (("enci", "ence"), ("anci", "ance")),
-    "e": (("izer", "ize"),),
-    "l": (("bli", "ble"), ("alli", "al"), ("entli", "ent"), ("eli", "e"), ("ousli", "ous")),
-    "o": (("ization", "ize"), ("ation", "ate"), ("ator", "ate")),
-    "s": (("alism", "al"), ("iveness", "ive"), ("fulness", "ful"), ("ousness", "ous")),
-    "t": (("aliti", "al"), ("iviti", "ive"), ("biliti", "ble")),
-    "g": (("logi", "log"),),
-}
+_STEP2: Final[Mapping[str, tuple[tuple[str, str], ...]]] = MappingProxyType(
+    {
+        "a": (("ational", "ate"), ("tional", "tion")),
+        "c": (("enci", "ence"), ("anci", "ance")),
+        "e": (("izer", "ize"),),
+        "l": (("bli", "ble"), ("alli", "al"), ("entli", "ent"), ("eli", "e"), ("ousli", "ous")),
+        "o": (("ization", "ize"), ("ation", "ate"), ("ator", "ate")),
+        "s": (("alism", "al"), ("iveness", "ive"), ("fulness", "ful"), ("ousness", "ous")),
+        "t": (("aliti", "al"), ("iviti", "ive"), ("biliti", "ble")),
+        "g": (("logi", "log"),),
+    }
+)
 
 # Step 3 handles -ic-, -full, -ness and friends, grouped by the last letter.
-_STEP3: Final[dict[str, tuple[tuple[str, str], ...]]] = {
-    "e": (("icate", "ic"), ("ative", ""), ("alize", "al")),
-    "i": (("iciti", "ic"),),
-    "l": (("ical", "ic"), ("ful", "")),
-    "s": (("ness", ""),),
-}
+_STEP3: Final[Mapping[str, tuple[tuple[str, str], ...]]] = MappingProxyType(
+    {
+        "e": (("icate", "ic"), ("ative", ""), ("alize", "al")),
+        "i": (("iciti", "ic"),),
+        "l": (("ical", "ic"), ("ful", "")),
+        "s": (("ness", ""),),
+    }
+)
 
 # Step 4 removes -ant, -ence etc. when the stem is long enough (m > 1).
-_STEP4: Final[dict[str, tuple[str, ...]]] = {
-    "a": ("al",),
-    "c": ("ance", "ence"),
-    "e": ("er",),
-    "i": ("ic",),
-    "l": ("able", "ible"),
-    "n": ("ant", "ement", "ment", "ent"),
-    "o": ("ion", "ou"),
-    "s": ("ism",),
-    "t": ("ate", "iti"),
-    "u": ("ous",),
-    "v": ("ive",),
-    "z": ("ize",),
-}
+_STEP4: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "a": ("al",),
+        "c": ("ance", "ence"),
+        "e": ("er",),
+        "i": ("ic",),
+        "l": ("able", "ible"),
+        "n": ("ant", "ement", "ment", "ent"),
+        "o": ("ion", "ou"),
+        "s": ("ism",),
+        "t": ("ate", "iti"),
+        "u": ("ous",),
+        "v": ("ive",),
+        "z": ("ize",),
+    }
+)
 
 
 def _apply_first_match(w: str, rules: tuple[tuple[str, str], ...]) -> str:
@@ -203,6 +211,8 @@ def porter_stem(word: str) -> str:
     is stemmed as its code units too, as two "consonants" for each of those
     letters, and the pairs are joined back into letters afterwards.
     """
+    if not isinstance(word, str):
+        raise TypeError(f"porter_stem needs a str, not {type(word).__name__}")
     if word.isascii() or max(word) <= "\uffff":
         return _stem_units(word)
     data = word.encode("utf-16-le", "surrogatepass")

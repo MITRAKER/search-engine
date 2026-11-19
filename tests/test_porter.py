@@ -93,6 +93,12 @@ def test_a_letter_beyond_u_ffff_counts_as_two_units_like_in_java(word, stem):
     assert porter_stem(word) == stem
 
 
+@pytest.mark.parametrize("bad", [None, 3, b"running"])
+def test_rejects_non_text(bad):
+    with pytest.raises(TypeError, match="porter_stem needs a str"):
+        porter_stem(bad)
+
+
 @pytest.mark.parametrize("word", ["", "a", "is", "xy"])
 def test_short_words_unchanged(word):
     assert porter_stem(word) == word

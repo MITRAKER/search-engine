@@ -7,6 +7,8 @@ from hypothesis import strategies as st
 from searchengine import bm25_idf, bm25_tf, tfidf_idf, tfidf_tf
 from searchengine.scoring import (
     JAVA_INT_MAX,
+    MAX_FIELD_WEIGHT,
+    MIN_FIELD_WEIGHT,
     check_bm25_params,
     float32,
     lucene_length,
@@ -76,9 +78,26 @@ def test_bm25_tf_rejects_bad_input(kwargs):
         bm25_tf(**kwargs)
 
 
-def test_tfidf_tf_rejects_negative():
+@pytest.mark.parametrize("bad", [math.nan, math.inf])
+@pytest.mark.parametrize("statistic", ["tf", "dl", "avgdl"])
+def test_bm25_tf_rejects_statistics_that_are_not_finite(statistic, bad):
+    kwargs = {"tf": 1.0, "dl": 1.0, "avgdl": 1.0, statistic: bad}
+    with pytest.raises(ValueError, match="invalid"):
+        bm25_tf(**kwargs)
+
+
+@pytest.mark.parametrize(("n", "df"), [(math.nan, 1), (math.inf, 1), (10, math.nan)])
+def test_idf_rejects_counts_that_are_not_finite(n, df):
+    """Without the check, bm25_idf(inf, 1) would quietly return inf."""
+    for idf in (bm25_idf, tfidf_idf):
+        with pytest.raises(ValueError, match="df"):
+            idf(n, df)
+
+
+@pytest.mark.parametrize("bad", [-1, math.nan, math.inf])
+def test_tfidf_tf_rejects_bad_counts(bad):
     with pytest.raises(ValueError, match="tf"):
-        tfidf_tf(-1)
+        tfidf_tf(bad)
 
 
 # ---------- Lucene's one-byte document lengths ----------
@@ -161,6 +180,12 @@ def test_float32_breaks_ties_to_even_like_java():
     assert float32(1 + 3 * 2**-24) == 1 + 2**-22
 
 
+@pytest.mark.parametrize("bad", ["1.5", None, True])
+def test_float32_needs_a_number(bad):
+    with pytest.raises(TypeError, match="float32 needs"):
+        float32(bad)
+
+
 def test_float32_overflows_to_infinity_like_java():
     assert float32(1e39) == math.inf
     assert float32(-1e39) == -math.inf
@@ -212,6 +237,35 @@ def test_weighted_total_drops_the_fraction_after_each_field():
 def test_weighted_total_with_whole_weights_is_exact():
     weights = {"title": 3.0, "body": 1.0}
     assert lucene_weighted_total({"title": 120, "body": 4567}, weights) == 4927
+
+
+@pytest.mark.parametrize(
+    ("lengths", "weights", "error"),
+    [
+        ([3], {"body": 1.0}, TypeError),  # lengths are not a mapping
+        ({"body": 3}, [("body", 1.0)], TypeError),  # nor are the weights
+        ({"body": 3}, {}, TypeError),  # nothing is weighted
+        ({"body": 3}, {"title": 1.0}, ValueError),  # a weighted field without a length
+        ({"body": 3}, {"body": "2"}, TypeError),
+        ({"body": 3}, {"body": True}, TypeError),
+        ({"body": 3}, {"body": MIN_FIELD_WEIGHT - 0.5}, ValueError),
+        ({"body": 3}, {"body": MAX_FIELD_WEIGHT + 1}, ValueError),
+        ({"body": 3}, {"body": math.nan}, ValueError),
+    ],
+)
+def test_weighted_lengths_and_totals_check_their_weights(lengths, weights, error):
+    with pytest.raises(error, match="weight"):
+        lucene_weighted_length(lengths, weights)
+    with pytest.raises(error, match="weight"):
+        lucene_weighted_total(lengths, weights)
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "3", True])
+def test_weighted_lengths_and_totals_check_their_lengths(bad):
+    with pytest.raises(ValueError, match="length"):
+        lucene_weighted_length({"body": bad}, {"body": 1.0})
+    with pytest.raises(ValueError, match="total lengths"):
+        lucene_weighted_total({"body": bad}, {"body": 1.0})
 
 
 # ---------- BM25 parameters ----------

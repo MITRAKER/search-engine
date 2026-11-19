@@ -98,6 +98,13 @@ def test_token_length_counts_utf16_units_like_java():
     assert analyze(bold_a * (MAX_TOKEN_LENGTH // 2 + 1)) == []  # 256 units: dropped
 
 
+@pytest.mark.parametrize("bad", [None, 3, b"word"])
+def test_word_helpers_need_text(bad):
+    for helper in (java_length, is_searchable):
+        with pytest.raises(TypeError, match="must be a str"):
+            helper(bad)
+
+
 def test_is_searchable_drops_stopwords_and_long_tokens():
     assert is_searchable("search")
     assert is_searchable("x" * MAX_TOKEN_LENGTH)
