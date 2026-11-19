@@ -8,8 +8,8 @@ Elasticsearch with the same analyzer as ``searchengine/analyzer.py``, runs a
 set of queries and saves the corpus, the queries and Elasticsearch's scores.
 It also saves the terms Elasticsearch's copy of the analyzer makes from some
 tricky text. The test then checks our engine against all of it, without
-needing Elasticsearch. Only the standard library is used, so it runs in the
-development environment.
+needing Elasticsearch. Besides the standard library it only needs this
+project, installed for development (``pip install -e .``).
 """
 
 from __future__ import annotations
@@ -21,13 +21,12 @@ import sys
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
+from searchengine.analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH
+
 ROOT: Final = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from searchengine.analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH  # noqa: E402
-
 OUTPUT: Final = ROOT / "tests" / "data" / "es_parity.json"
 INDEX: Final = "parity-golden"
 SEED: Final = 2026
@@ -70,11 +69,11 @@ ANALYZER_TEXTS: Final = (
     "ha" + "\N{MATHEMATICAL BOLD SMALL B}" * 2 + "ing",
 )
 WEIGHTINGS: Final = (
-    {"title": 3.0, "body": 1.0},
-    {"body": 1.0},
-    {"title": 1.0},
-    {"title": 1.7, "body": 1.3},
-    {"title": 2.5, "body": 1.0},
+    MappingProxyType({"title": 3.0, "body": 1.0}),
+    MappingProxyType({"body": 1.0}),
+    MappingProxyType({"title": 1.0}),
+    MappingProxyType({"title": 1.7, "body": 1.3}),
+    MappingProxyType({"title": 2.5, "body": 1.0}),
 )
 
 
@@ -107,10 +106,10 @@ def make_corpus(rng: random.Random) -> list[dict[str, str]]:
 def make_cases() -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     for word in ("search", "lucene", "replica", "snippet", "throughput"):
-        cases += [{"query": word, "weights": w, "mode": "or"} for w in WEIGHTINGS]
+        cases += [{"query": word, "weights": dict(w), "mode": "or"} for w in WEIGHTINGS]
     for query in ("search engine", "rank score latency", "fuzzy stem suggest highlight"):
-        cases.append({"query": query, "weights": WEIGHTINGS[0], "mode": "or"})
-        cases.append({"query": query, "weights": WEIGHTINGS[3], "mode": "and"})
+        cases.append({"query": query, "weights": dict(WEIGHTINGS[0]), "mode": "or"})
+        cases.append({"query": query, "weights": dict(WEIGHTINGS[3]), "mode": "and"})
     phrases = ('"search engine"', '"index rank"', '"search the engine"', '"search engine index"')
     for query in phrases:
         cases.append({"query": query, "weights": {"body": 1.0}, "mode": "or"})

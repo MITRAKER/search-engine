@@ -1,20 +1,9 @@
 """Tests for scripts/release_notes.py, which the release workflow relies on."""
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 
 import searchengine
-
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "release_notes.py"
-spec = importlib.util.spec_from_file_location("release_notes", SCRIPT)
-assert spec is not None
-assert spec.loader is not None
-release_notes = importlib.util.module_from_spec(spec)
-sys.modules["release_notes"] = release_notes
-spec.loader.exec_module(release_notes)
+from scripts import release_notes
 
 CHANGELOG = """# Changelog
 
@@ -62,3 +51,11 @@ def test_main_with_the_real_changelog(capsys):
     assert release_notes.main([tag]) == 0
     assert "### Added" in capsys.readouterr().out
     assert release_notes.main(["v99.0.0"]) == 1
+
+
+def test_main_refuses_a_tag_that_is_not_the_package_version(tmp_path, monkeypatch, capsys):
+    init = tmp_path / "__init__.py"
+    init.write_text('__version__ = "0.0.9"\n')
+    monkeypatch.setattr(release_notes, "INIT", init)
+    assert release_notes.main([f"v{searchengine.__version__}", "--check-version"]) == 1
+    assert "but searchengine.__version__ is 0.0.9" in capsys.readouterr().err

@@ -129,7 +129,9 @@ markers = ["integration: needs a running Elasticsearch (set ES_URL)"]
 # ------------------------------------------------------------ coverage ----
 [tool.coverage.run]
 branch = true
-source = ["searchengine"]
+source = ["searchengine", "scripts"]
+# Records Elasticsearch's scores, so it needs a live Elasticsearch to run.
+omit = ["scripts/make_parity_golden.py"]
 
 [tool.coverage.report]
 show_missing = true
