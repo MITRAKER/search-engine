@@ -29,5 +29,5 @@ audit:  ## look for dependencies with known vulnerabilities
 hygiene:  ## the other pre-commit checks (whitespace, YAML, large files, keys)
 	SKIP=ruff-check,ruff-format,mypy,jpl-rules pre-commit run --all-files
 
-check: lint types jpl test hygiene  ## everything CI checks (except the audit)
+check: lint types jpl test hygiene  ## the main CI checks, on one Python version (not the audit)
 	ruff format --check .
