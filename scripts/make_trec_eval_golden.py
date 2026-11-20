@@ -14,7 +14,6 @@ pytrec_eval is only needed here, so it is not a dependency of the project.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import random
 import sys
@@ -22,6 +21,8 @@ from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Final
+
+import pytrec_eval
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 OUTPUT: Final = ROOT / "tests" / "data" / "trec_eval.json"
@@ -56,7 +57,6 @@ def as_run(rankings: dict[str, list[str]]) -> dict[str, dict[str, float]]:
 
 def trec_eval_scores(cases: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     """trec_eval's nDCG@K, P@K, Recall@DEPTH, MAP@DEPTH and MRR@K, per query."""
-    pytrec_eval = importlib.import_module("pytrec_eval")
     qrels = {case["id"]: case["grades"] for case in cases}
     measures = {f"ndcg_cut_{K}", f"P_{K}", f"recall_{DEPTH}", f"map_cut_{DEPTH}"}
     full = pytrec_eval.RelevanceEvaluator(qrels, measures).evaluate(

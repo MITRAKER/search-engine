@@ -23,7 +23,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeAlias
 
 from .datasets import (
     SAMPLE,
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from .es_dsl import QueryType
     from .es_engine import ElasticsearchEngine
 
-Engine = Literal["scratch", "es"]
+Engine: TypeAlias = Literal["scratch", "es"]
 WARMUP_QUERIES: Final = 20  # run untimed first: caches, connections, lazy setup
 DEFAULT_ES_INDEX: Final = "searchengine-bench"
 # How far a recorded quality score may move before --check calls it a change.

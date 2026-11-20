@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeAlias
 
 from .analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH, Token, analyze_tokens, is_searchable
 from .index import (
@@ -127,7 +127,7 @@ def index_settings(k1: float = DEFAULT_K1, b: float = DEFAULT_B) -> dict[str, An
 # ---------- queries ----------
 
 
-QueryType = Literal["combined_fields", "best_fields"]
+QueryType: TypeAlias = Literal["combined_fields", "best_fields"]
 
 
 def build_query(
