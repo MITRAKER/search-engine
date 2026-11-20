@@ -208,6 +208,8 @@ def randomization_test(
     if isinstance(trials, bool) or not isinstance(trials, int) or not 1 <= trials <= MAX_TRIALS:
         raise ValueError(f"trials must be an int from 1 to {MAX_TRIALS}")
     differences = [a - b for a, b in zip(first, second, strict=True)]
+    if not all(math.isfinite(diff) for diff in differences):
+        raise ValueError("the scores must be finite numbers")
     observed = abs(math.fsum(differences))
     tolerance = 1e-9 * max(1.0, observed)  # do not let rounding decide a tie
     rng = random.Random(seed)  # noqa: S311 - a statistics test, not cryptography

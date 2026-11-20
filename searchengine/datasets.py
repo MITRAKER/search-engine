@@ -10,11 +10,13 @@ of the same kind.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
 import tarfile
 import urllib.request
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any, Final
@@ -137,16 +139,20 @@ def unpack_scifact(archive: bytes, dest: Path, sha256: str = SCIFACT_SHA256) -> 
     if digest != sha256:
         raise ValueError(f"the SciFact archive is not the expected one (sha256 {digest})")
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-        for name in SCIFACT_FILES:
-            try:
-                member = tar.getmember(f"data/{name}")
-            except KeyError as error:
-                raise ValueError(f"the SciFact archive has no data/{name}") from error
-            source = tar.extractfile(member) if member.isfile() else None
-            if source is None or member.size > MAX_DOWNLOAD_BYTES:
-                raise ValueError(f"the SciFact archive's data/{name} is not a usable file")
-            (dest / name).write_bytes(source.read(MAX_DOWNLOAD_BYTES))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            for name in SCIFACT_FILES:
+                try:
+                    member = tar.getmember(f"data/{name}")
+                except KeyError as error:
+                    raise ValueError(f"the SciFact archive has no data/{name}") from error
+                source = tar.extractfile(member) if member.isfile() else None
+                if source is None or member.size > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(f"the SciFact archive's data/{name} is not a usable file")
+                (dest / name).write_bytes(source.read(MAX_DOWNLOAD_BYTES))
+    # tarfile, gzip and zlib each report a damaged archive with their own error.
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, zlib.error) as error:
+        raise ValueError(f"the SciFact archive is not a valid .tar.gz file ({error})") from error
 
 
 def fetch_scifact(
