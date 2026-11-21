@@ -64,7 +64,7 @@ hits = index.search("inverted", options=SearchOptions(fuzzy=True))
 
 ```bash
 pip install -e ".[es]"                             # adds the Elasticsearch client
-docker compose up -d                               # Elasticsearch 9.5.5 on localhost:9200
+docker compose up -d --wait                        # Elasticsearch 9.5.5 on localhost:9200
 searchengine --engine es "inverted index"          # the first run creates and fills the index
 searchengine --engine es --category ranking "search"   # only one category, with facet counts
 searchengine --engine es --explain "bm25 ranking"  # Elasticsearch's own score breakdown

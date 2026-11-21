@@ -578,9 +578,11 @@ several shards; then the `dfs_query_then_fetch` search type gathers the
 statistics from all shards first, at the cost of an extra round trip.)
 
 **The same BM25.** The index's default similarity is BM25 with our `k1` and
-`b`. They are fixed when the index is created, so the engine refuses a search
-that asks for other values, and refuses to reuse an index that was made with
-other ones.
+`b`. They are *static* index settings: changing them means closing the
+index, updating its settings and opening it again (no reindexing is needed,
+since BM25 only uses them at search time). So the engine treats them as part
+of the index: it refuses a search that asks for other values, and refuses to
+reuse an index that was made with other ones.
 
 **`combined_fields` for BM25F.** There are two families of multi-field
 queries, and the difference is a classic interview topic:
@@ -590,6 +592,8 @@ queries, and the difference is a classic interview topic:
   `"operator": "and"` means "all words in the **same** field".
 - *Term-centric*, like `combined_fields`: treat the fields as one big field,
   which is exactly BM25F. "and" means "all words, in any field".
+  `multi_match` with `cross_fields` is term-centric too, but it still scores
+  each field on its own, with blended statistics, instead of computing BM25F.
 
 Our engine is term-centric, so the words go to `combined_fields`, with the
 weights written as `title^3.0`. It runs Lucene's `CombinedFieldQuery`, whose
@@ -598,30 +602,44 @@ require every weight to be at least 1.
 
 ### 4.3 What a real product adds
 
-- **Bulk loading.** `index_documents` sends 500 documents per bulk request.
-  It uses the `create` action, so a duplicate id is an error instead of a
-  silent overwrite. Unlike `InvertedIndex.add`, a bulk load is not atomic:
-  documents sent before a failure stay in the index, so the command line
-  deletes a half-built index.
+- **Bulk loading.** `index_documents` sends up to 500 documents, or about
+  10 MB, per bulk request: Elasticsearch refuses a request over 100 MB. It
+  uses the `create` action, so a duplicate id is an error instead of a silent
+  overwrite. The index must exist first; otherwise Elasticsearch would create
+  one by itself, with its default analyzer. Unlike `InvertedIndex.add`, a
+  bulk load is not atomic: documents sent before a failure stay in the index
+  (as they do with `InvertedIndex.add_many`), so the command line deletes a
+  half-built index, on an error or on Ctrl-C.
 - **Facets.** A `terms` aggregation counts the matches per category. The
   category filter goes in `post_filter`, which runs *after* the counting, so
   the counts still show every category and the user can switch with one click.
   A filter inside the query would also shrink the counts.
 - **Highlighting.** Elasticsearch returns snippets with the matches wrapped in
   `<mark>`. With `"encoder": "html"` it escapes the document text first, so a
-  document containing `<script>` cannot inject code into a results page.
+  document containing `<script>` cannot inject code into a results page. It
+  refuses to highlight past the first million characters of a field and fails
+  the whole search, unless the request sets `max_analyzed_offset`: then it
+  only highlights the start of a longer field.
 - **Autocomplete.** The title also has a `search_as_you_type` sub-field, which
   indexes word prefixes and two- and three-word shingles. A `bool_prefix`
   query matches every typed word exactly, except the last one, which may be
-  a prefix: "inverted ind" finds "Inverted index".
+  a prefix: "inverted ind" finds "Inverted index". Its operator is "and", so
+  every word must match; by default one of them would be enough.
 - **"Did you mean".** A **term suggester** per word on a `spelling` field
-  that holds every field's words, unstemmed. It allows as many typos as our
-  `SpellingIndex` (fuzziness `AUTO`) and only fixes words the index does not
-  know.
+  that holds every field's words, unstemmed. It allows the same number of
+  typos as our `SpellingIndex` (fuzziness `AUTO`). Because that field is not
+  stemmed, the same request also counts the documents each word matches in
+  the searched fields: a word that matches is known and stays as it is, as in
+  our engine ("analyzer" is fine when the index has "analyzers").
 - **Unknown fields.** The mapping is `"dynamic": "false"`: a field we did not
   map (like `url`) is stored and returned, but not indexed. Otherwise every
-  new field name in the data would add a mapping, and a messy dataset could
-  grow the mapping without limit.
+  new field name in the data would add a mapping, until the index reaches
+  `index.mapping.total_fields.limit` (1,000 fields) and refuses documents with
+  new fields: a "mapping explosion".
+- **Ties.** Lucene returns equal scores in index order, our engine by
+  document id. The id is also indexed as a `keyword`, and the search sorts by
+  score and then by id, so both engines keep the same documents when `k`
+  cuts through a tie.
 
 ### 4.4 Where the two engines differ, on purpose
 
@@ -630,8 +648,8 @@ require every weight to be at least 1.
 | Typos (`fuzzy`) | corrects each word to the one closest known word, then searches | expands each word to the indexed terms within the allowed edits and scores them all |
 | Phrase on several fields, or with a weight other than 1 | BM25F with the phrase count | the best field's score, multiplied by its weight |
 | TF-IDF | yes | no: Elasticsearch 9 has no TF-IDF similarity |
-| Fuzzy phrases | yes | no such query |
-| Failed load | nothing changes | earlier documents stay |
+| Typos of two swapped letters ("rnak") | two edits | one edit (a transposition), so short words get more fixes |
+| Fuzzy phrases | yes | not offered: phrase queries have no fuzziness, and intervals or span queries, which do, score differently |
 
 Everything else gives the same results with the same scores, to about 7
 significant digits: words in OR and AND mode, any field weights, and phrases
@@ -666,11 +684,13 @@ queries: `scripts/make_parity_golden.py` builds its index with
 In CI, the `integration` job starts Elasticsearch as a **service container**
 next to the job. It is the same image as `docker-compose.yml`, pinned by
 digest, and `tests/test_repo_config.py` fails if the two ever drift apart.
+The release workflow starts the same container, so a tag whose integration
+tests fail is never released.
 
 ### Try it
 
 ```bash
-docker compose up -d                       # Elasticsearch on localhost:9200
+docker compose up -d --wait                # Elasticsearch on localhost:9200
 pip install -e ".[es]"
 searchengine --engine es "inverted index"  # creates and fills the index once
 searchengine --engine es --category ranking "bm25"
@@ -684,8 +704,11 @@ pytest -m integration                       # both engines side by side
 - *Why can the same document get different scores on different shards?* Each
   shard computes N, df and avgdl from its own documents. Use one shard or
   `dfs_query_then_fetch` when exact scores matter.
-- *`multi_match` or `combined_fields`?* Field-centric versus term-centric:
-  `combined_fields` treats several fields as one (BM25F).
+- *`multi_match` or `combined_fields`?* `multi_match` with `best_fields` or
+  `most_fields` is field-centric: each field scores on its own.
+  `combined_fields` is term-centric and treats several fields as one (BM25F).
+  `multi_match` with `cross_fields` is term-centric too, but blends per-field
+  scores instead.
 - *`text` versus `keyword`?* `text` is analyzed into terms for full-text
   search; `keyword` is one exact value, for filters, sorting and aggregations.
 - *Query, filter or `post_filter`?* A query scores; a filter only includes or
@@ -711,3 +734,7 @@ pytest -m integration                       # both engines side by side
 5. Run `searchengine --engine es "elastisearch"` and then with `--fuzzy`.
    Compare the results with `--engine scratch`, and explain the differences
    using 4.4.
+6. Make `spelling.edit_distance` count two swapped neighbouring letters as
+   one edit (the "optimal string alignment" distance), as Lucene does. Then
+   "rnak" gets the same suggestion from both engines: add an integration
+   test that shows it.
