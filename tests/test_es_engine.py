@@ -4,17 +4,16 @@ import pytest
 from elasticsearch import Elasticsearch, NotFoundError
 
 from searchengine import SearchOptions
-from searchengine.es_dsl import ANALYZER, index_mappings, index_settings
+from searchengine.es_dsl import ANALYZER, MAX_PREFIX_LENGTH, index_mappings, index_settings
 from searchengine.es_engine import (
     BULK_CHUNK_SIZE,
     MAX_ANALYZE_LENGTH,
     MAX_AUTOCOMPLETE,
-    MAX_PREFIX_LENGTH,
     ElasticsearchEngine,
     IndexingError,
     default_url,
 )
-from searchengine.index import MAX_QUERY_TERMS
+from searchengine.index import MAX_QUERY_LENGTH, MAX_QUERY_TERMS
 from tests.fake_es import FakeElasticsearch, fake_client, not_found, search_response
 
 
@@ -58,10 +57,47 @@ def test_create_index_sends_our_settings_and_mappings():
     assert create == {"index": "test", "settings": index_settings(), "mappings": index_mappings()}
 
 
-def test_an_existing_index_is_kept_if_its_bm25_settings_match():
+def test_an_existing_index_is_kept_if_it_was_made_like_ours():
     engine, fake = make_engine(existing=True)
     assert engine.create_index() is False
     assert fake.called("indices.create") == []
+    assert fake.called("indices.get_mapping") == [{"index": "test"}]
+
+
+def test_an_alias_of_one_index_can_be_used():
+    engine, fake = make_engine(existing=True)
+    fake.concrete = ["test-2026"]  # the alias "test" names this index
+    assert engine.create_index() is False
+
+
+def test_an_alias_of_several_indices_is_refused():
+    engine, fake = make_engine(existing=True)
+    fake.concrete = ["test-a", "test-b"]
+    with pytest.raises(ValueError, match="names 2 indices"):
+        engine.create_index()
+
+
+@pytest.mark.parametrize(
+    "mappings",
+    [
+        index_mappings(["title"]),  # made for other fields: "body" is not indexed
+        {"properties": {**index_mappings()["properties"], "body": {"type": "text"}}},
+        {"properties": {k: v for k, v in index_mappings()["properties"].items() if k != "id"}},
+        {},
+    ],
+)
+def test_an_existing_index_with_other_mappings_is_refused(mappings):
+    engine, fake = make_engine(existing=True)
+    fake.mappings = mappings
+    with pytest.raises(ValueError, match=r"maps '\w+' differently; recreate it"):
+        engine.create_index()
+
+
+def test_recreate_must_be_true_or_false():
+    engine, fake = make_engine(existing=True)
+    with pytest.raises(TypeError, match="True or False"):
+        engine.create_index(recreate="no")  # type: ignore[arg-type]
+    assert fake.calls == []
 
 
 def test_an_existing_index_with_other_bm25_settings_is_refused():
@@ -99,18 +135,37 @@ def docs(count: int) -> list[dict[str, object]]:
 
 
 def test_documents_are_sent_in_chunks_with_create_actions():
-    engine, fake = make_engine()
+    engine, fake = make_engine(existing=True)
     assert engine.index_documents(docs(BULK_CHUNK_SIZE * 2 + 1)) == BULK_CHUNK_SIZE * 2 + 1
     sizes = [len(call["operations"]) // 2 for call in fake.called("bulk")]
     assert sizes == [BULK_CHUNK_SIZE, BULK_CHUNK_SIZE, 1]
     action, source = fake.called("bulk")[0]["operations"][:2]
     assert action == {"create": {"_index": "test", "_id": "0"}}  # ids become strings
-    assert source == {"title": "title 0", "body": "text", "url": "u"}
+    # The id stays in the document too: the index sorts equal scores by it.
+    assert source == {"id": "0", "title": "title 0", "body": "text", "url": "u"}
     assert fake.called("indices.refresh") == [{"index": "test"}]
 
 
-def test_documents_are_checked_like_the_from_scratch_engine():
+def test_large_documents_are_sent_in_smaller_chunks(monkeypatch):
+    # Elasticsearch refuses requests over 100 MB, whatever the document count.
+    monkeypatch.setattr("searchengine.es_engine.BULK_CHUNK_BYTES", 1000)
+    engine, fake = make_engine(existing=True)
+    big = [{"id": n, "body": "x" * 400} for n in range(5)]
+    assert engine.index_documents(big) == 5
+    sizes = [len(call["operations"]) // 2 for call in fake.called("bulk")]
+    assert sizes == [3, 2]  # flushed once 1000 bytes are reached
+
+
+def test_documents_need_an_existing_index():
+    # Otherwise Elasticsearch would create one, with its own analyzer.
     engine, fake = make_engine()
+    with pytest.raises(ValueError, match="does not exist"):
+        engine.index_documents(docs(1))
+    assert fake.called("bulk") == []
+
+
+def test_documents_are_checked_like_the_from_scratch_engine():
+    engine, fake = make_engine(existing=True)
     with pytest.raises(TypeError, match="must be a string"):
         engine.index_documents([{"id": "1", "title": 42}])
     with pytest.raises(ValueError, match="reserved"):
@@ -119,7 +174,7 @@ def test_documents_are_checked_like_the_from_scratch_engine():
 
 
 def test_rejected_documents_raise_with_the_first_reason():
-    engine, fake = make_engine()
+    engine, fake = make_engine(existing=True)
     fake.bulk_errors = {"1": "version conflict, document already exists"}
     with pytest.raises(IndexingError, match="1 of 3 documents failed; first: id 1: version"):
         engine.index_documents(docs(3))
@@ -163,10 +218,20 @@ def test_search_only_searches_weighted_fields():
     assert set(request["highlight"]["fields"]) == {"body"}
 
 
-def test_k1_and_b_cannot_change_after_the_index_is_made():
+def test_k1_and_b_are_settings_of_the_index():
     engine, _ = make_engine()
-    with pytest.raises(ValueError, match="fixed"):
+    with pytest.raises(ValueError, match="settings of the Elasticsearch index"):
         engine.search("x", options=SearchOptions(k1=2.0))
+
+
+def test_search_body_checks_without_sending_anything():
+    engine, fake = make_engine()
+    body = engine.search_body("inverted index", k=3, category="indexing")
+    assert body["size"] == 3
+    assert body["post_filter"] == {"term": {"category": "indexing"}}
+    with pytest.raises(ValueError, match="BM25 only"):
+        engine.search_body("x", options=SearchOptions(ranker="tfidf"))
+    assert fake.calls == []
 
 
 @pytest.mark.parametrize(
@@ -213,19 +278,46 @@ def test_explain_of_a_missing_index_raises():
 def test_suggest_asks_only_about_words_that_may_be_misspelled():
     engine, fake = make_engine()
     fake.search_responses = [
-        {"suggest": {"word1": [{"options": [{"text": "elasticsearch", "score": 0.8}]}]}}
+        {
+            "suggest": {"word1": [{"options": [{"text": "elasticsearch", "score": 0.8}]}]},
+            "aggregations": {"known": {"buckets": {"word1": {"doc_count": 0}}}},
+        }
     ]
     assert engine.suggest("the elastisearch") == "the elasticsearch"
     [request] = fake.called("search")
+    assert request["size"] == 0
     assert set(request["suggest"]) == {"word1"}
+    assert set(request["aggs"]["known"]["filters"]["filters"]) == {"word1"}
     assert engine.suggest("an of") is None  # nothing to fix: no request at all
     assert len(fake.called("search")) == 1
 
 
-def test_suggest_is_bounded_like_search():
-    engine, _ = make_engine()
-    with pytest.raises(ValueError, match="limited"):
-        engine.suggest(" ".join(["elastisearch"] * (MAX_QUERY_TERMS + 1)))
+def test_suggest_keeps_words_that_match_documents():
+    # "analyzer" is not in the (unstemmed) spelling field, but its stem
+    # matches documents, so it is not a typo: our engine keeps it too.
+    engine, fake = make_engine()
+    fake.search_responses = [
+        {
+            "suggest": {"word0": [{"options": [{"text": "analyzers"}]}]},
+            "aggregations": {"known": {"buckets": {"word0": {"doc_count": 3}}}},
+        }
+    ]
+    assert engine.suggest("analyzer") is None
+
+
+@pytest.mark.parametrize(
+    ("query", "error"),
+    [
+        (" ".join(["elastisearch"] * (MAX_QUERY_TERMS + 1)), ValueError),
+        ("a" * (MAX_QUERY_LENGTH + 1), ValueError),
+        (None, TypeError),
+    ],
+)
+def test_suggest_is_bounded_like_search(query, error):
+    engine, fake = make_engine()
+    with pytest.raises(error):
+        engine.suggest(query)
+    assert fake.called("search") == []
 
 
 def test_autocomplete_returns_distinct_titles():
@@ -280,7 +372,7 @@ def test_analyze_checks_its_input():
 
 
 def test_no_documents_means_no_bulk_request():
-    engine, fake = make_engine()
+    engine, fake = make_engine(existing=True)
     assert engine.index_documents([]) == 0
     assert fake.called("bulk") == []
     assert fake.called("indices.refresh") == [{"index": "test"}]

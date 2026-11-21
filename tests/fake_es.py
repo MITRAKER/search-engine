@@ -12,6 +12,8 @@ from typing import Any, cast
 from elastic_transport import ApiResponseMeta, HttpHeaders, NodeConfig
 from elasticsearch import Elasticsearch, NotFoundError
 
+from searchengine.es_dsl import index_mappings
+
 
 @dataclass
 class Response:
@@ -65,9 +67,18 @@ class FakeIndices:
         self.es.existing = False
         return Response({"acknowledged": True})
 
+    def _per_index(self, name: str, value: dict[str, Any]) -> Response:
+        """Elasticsearch answers per concrete index: an alias may name several."""
+        names = self.es.concrete or [name]
+        return Response(dict.fromkeys(names, value))
+
     def get_settings(self, **kwargs: Any) -> Response:
         self.es.record("indices.get_settings", kwargs)
-        return Response({kwargs["index"]: {"settings": self.es.settings}})
+        return self._per_index(kwargs["index"], {"settings": self.es.settings})
+
+    def get_mapping(self, **kwargs: Any) -> Response:
+        self.es.record("indices.get_mapping", kwargs)
+        return self._per_index(kwargs["index"], {"mappings": self.es.mappings})
 
     def refresh(self, **kwargs: Any) -> Response:
         self.es.record("indices.refresh", kwargs)
@@ -89,6 +100,8 @@ class FakeElasticsearch:
             "index.similarity.default.k1": "1.2",
             "index.similarity.default.b": "0.75",
         }
+        self.mappings: dict[str, Any] = index_mappings()
+        self.concrete: list[str] = []  # the indices an alias names; empty: not an alias
         self.bulk_errors: dict[str, str] = {}  # document id -> error reason
         self.search_responses: list[dict[str, Any]] = []
         self.explain_result: dict[str, Any] | Exception = {"matched": True, "explanation": {}}

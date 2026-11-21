@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from elastic_transport import ConnectionError as TransportConnectionError
+from elastic_transport import ConnectionTimeout
 
 from searchengine.cli import main
 from tests.fake_es import fake_client, not_found, search_response
@@ -59,7 +60,16 @@ def test_unreachable_elasticsearch_gets_a_hint(capsys, monkeypatch):
     assert main(["--engine", "es", "x"], es_client=client) == 1
     error = capsys.readouterr().err
     assert "cannot reach Elasticsearch at http://localhost:1" in error
-    assert "docker compose up -d" in error
+    assert "docker compose up -d --wait" in error  # --wait: until it answers
+
+
+def test_a_timeout_is_a_one_line_error(capsys):
+    client, fake = fake_client(existing=True)
+    fake.fail_with = ConnectionTimeout("timed out")
+    assert main(["--engine", "es", "x"], es_client=client) == 1
+    error = capsys.readouterr().err
+    assert error.startswith("searchengine: error: Elasticsearch: ")
+    assert error.count("\n") == 1  # one line, no traceback
 
 
 def test_elasticsearch_errors_are_one_line(capsys):
@@ -77,16 +87,51 @@ def test_a_failed_fill_deletes_the_half_built_index(capsys):
     assert "documents failed" in capsys.readouterr().err
 
 
-def test_bad_queries_for_elasticsearch_are_one_line_errors(capsys):
+@pytest.mark.parametrize("reindex", [[], ["--reindex"]])
+def test_bad_queries_fail_before_the_index_is_touched(capsys, reindex):
     client, fake = fake_client(existing=True)
-    assert main(["--engine", "es", "--ranker", "tfidf", "x"], es_client=client) == 1
+    assert main(["--engine", "es", *reindex, "--ranker", "tfidf", "x"], es_client=client) == 1
     assert "BM25 only" in capsys.readouterr().err
-    assert fake.called("search") == []
+    assert fake.calls == []  # with --reindex too: the index is still there
 
 
-def test_elasticsearch_options_need_the_es_engine(capsys):
+def test_reindex_reads_the_data_before_deleting_the_index(capsys, tmp_path):
+    client, fake = fake_client(existing=True)
+    missing = str(tmp_path / "no-such-file.jsonl")
+    assert main(["--engine", "es", "--reindex", "--data", missing, "x"], es_client=client) == 1
+    assert "No such file" in capsys.readouterr().err
+    assert fake.called("indices.delete") == []
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"id": "1", "title": "ok"}\nnot json\n', encoding="utf-8")
+    assert main(["--engine", "es", "--reindex", "--data", str(bad), "x"], es_client=client) == 1
+    assert fake.called("indices.delete") == []
+
+
+def test_ctrl_c_during_the_fill_deletes_the_half_built_index(monkeypatch):
+    client, fake = fake_client()
+
+    def interrupted(**kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fake, "bulk", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        main(["--engine", "es", "x"], es_client=client)
+    assert fake.called("indices.delete") == [{"index": "searchengine"}]
+
+
+def test_an_empty_index_name_is_refused_not_replaced(capsys):
+    client, fake = fake_client(existing=True)
+    assert main(["--engine", "es", "--index", "", "--reindex", "x"], es_client=client) == 1
+    assert "invalid index name ''" in capsys.readouterr().err
+    assert fake.calls == []  # the default index was not touched
+
+
+@pytest.mark.parametrize(
+    "arguments", [["--category", "web"], ["--index", "notes"], ["--index", ""], ["--category", ""]]
+)
+def test_elasticsearch_options_need_the_es_engine(capsys, arguments):
     with pytest.raises(SystemExit) as exit_info:
-        main(["--category", "web", "x"])
+        main([*arguments, "x"])
     assert exit_info.value.code == 2
     assert "need --engine es" in capsys.readouterr().err
 

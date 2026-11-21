@@ -19,15 +19,17 @@ The index is set up so Elasticsearch scores like ``InvertedIndex``:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from .analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH, Token, analyze_tokens, is_searchable
 from .index import (
     DEFAULT_FIELDS,
+    MAX_QUERY_LENGTH,
     MAX_QUERY_TERMS,
     MAX_RESULTS,
     SearchOptions,
+    check_field_names,
     check_options,
     split_phrase,
 )
@@ -46,7 +48,12 @@ WORD_SEPARATORS: Final = r"[^\p{L}\p{M}\p{N}]+"
 MAX_FACETS: Final = 50
 MAX_CATEGORY_LENGTH: Final = 256  # characters
 MAX_EXPLAIN_LINES: Final = 200
+MAX_PREFIX_LENGTH: Final = 256  # characters, for autocomplete
 HIGHLIGHT_TAGS: Final = ("<mark>", "</mark>")
+# Elasticsearch refuses to highlight past index.highlight.max_analyzed_offset
+# (1,000,000 characters) and fails the whole search, unless the request sets a
+# lower limit: then it highlights only the start of a longer field.
+HIGHLIGHT_MAX_OFFSET: Final = 999_999
 _FIELD_NAME: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
@@ -54,14 +61,12 @@ _FIELD_NAME: Final = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
 
 def check_fields(fields: Iterable[str]) -> tuple[str, ...]:
-    """Field names that are safe to map: a letter first, no dots, not reserved."""
-    if isinstance(fields, str):
-        raise TypeError("fields must be a list of names, not one string")
-    names = tuple(fields)
-    if not names or len(set(names)) != len(names):
-        raise ValueError("fields must be a non-empty list of distinct names")
+    """Field names that are safe to map: the same limits as ``InvertedIndex``
+    (1 to MAX_FIELDS distinct names), and each a letter first, then letters,
+    digits or '_', and not reserved."""
+    names = check_field_names(fields)
     for name in names:
-        if not isinstance(name, str) or not _FIELD_NAME.fullmatch(name):
+        if not _FIELD_NAME.fullmatch(name):
             raise ValueError(f"invalid field name {name!r}: use letters, digits and '_'")
         if name in RESERVED_FIELDS:
             raise ValueError(f"field name {name!r} is reserved")
@@ -95,7 +100,11 @@ def analysis_settings() -> dict[str, Any]:
 
 
 def index_mappings(fields: Iterable[str] = DEFAULT_FIELDS) -> dict[str, Any]:
-    """Field types. Searchable fields use our analyzer and feed the spelling field."""
+    """Field types. Searchable fields use our analyzer and feed the spelling field.
+
+    The document id is also kept as a keyword, so results with the same score
+    can be sorted by id, as ``InvertedIndex`` sorts them.
+    """
     properties: dict[str, Any] = {
         name: {"type": "text", "analyzer": ANALYZER, "copy_to": SPELLING_FIELD}
         for name in check_fields(fields)
@@ -107,6 +116,7 @@ def index_mappings(fields: Iterable[str] = DEFAULT_FIELDS) -> dict[str, Any]:
         }
     properties[SPELLING_FIELD] = {"type": "text", "analyzer": WORDS_ANALYZER}
     properties[FACET_FIELD] = {"type": "keyword"}  # exact values, for filters and facets
+    properties["id"] = {"type": "keyword"}  # to break ties between equal scores
     # Other fields, like "url", are kept in _source and returned, but not indexed.
     return {"dynamic": "false", "properties": properties}
 
@@ -149,7 +159,9 @@ def build_query(query: str, options: SearchOptions, weights: Mapping[str, float]
     fields = [f"{name}^{weight}" for name, weight in weights.items()]
     if phrase:
         if options.fuzzy:
-            raise ValueError("Elasticsearch has no fuzzy phrase query: drop the quotes or fuzzy")
+            # Elasticsearch's phrase queries have no fuzziness. Intervals and span
+            # queries can match a fuzzy phrase, but they score differently.
+            raise ValueError("no fuzzy phrase search on Elasticsearch: drop the quotes or fuzzy")
         return {"multi_match": {"query": text, "type": "phrase", "fields": fields}}
     if options.fuzzy:
         return _fuzzy_query(tokens, fields, options.mode)
@@ -178,18 +190,23 @@ def build_search_body(
     The category filter goes in ``post_filter``, which runs *after* the facets
     are counted. So the facets still count every category the query matches,
     and a user can switch to another category without searching again.
+    Results with the same score are sorted by id, as ``InvertedIndex`` does.
     """
+    if not isinstance(query, Mapping):
+        raise TypeError("query must be a query DSL mapping")
     if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= MAX_RESULTS:
         raise ValueError(f"k must be an int between 1 and {MAX_RESULTS}")
     body: dict[str, Any] = {
         "query": dict(query),
         "size": k,
+        "sort": [{"_score": "desc"}, {"id": "asc"}],
         "aggs": {"facets": {"terms": {"field": FACET_FIELD, "size": MAX_FACETS}}},
         "highlight": {
             "encoder": "html",  # escape the document text, so snippets are safe in a page
             "pre_tags": [HIGHLIGHT_TAGS[0]],
             "post_tags": [HIGHLIGHT_TAGS[1]],
-            "fields": {name: {} for name in fields},
+            "max_analyzed_offset": HIGHLIGHT_MAX_OFFSET,
+            "fields": {name: {} for name in check_field_names(fields)},
         },
         "track_total_hits": True,  # an exact count, not "10,000 or more"
     }
@@ -201,26 +218,51 @@ def build_search_body(
 
 
 def autocomplete_query(prefix: str) -> dict[str, Any]:
-    """Match titles that start with what the user typed, word by word.
+    """Match titles that contain every word the user typed.
 
     ``bool_prefix`` treats every word as a whole term except the last, which
-    may be the start of a word ("inv" for "inverted").
+    may be the start of a word ("inv" for "inverted"). The operator "and"
+    makes every word count: by default one matching word would be enough.
     """
+    if not isinstance(prefix, str):
+        raise TypeError("prefix must be a str")
+    if len(prefix) > MAX_PREFIX_LENGTH:
+        raise ValueError(f"prefix is longer than {MAX_PREFIX_LENGTH} characters")
     complete = "title.complete"
     fields = [complete, f"{complete}._2gram", f"{complete}._3gram"]
-    return {"multi_match": {"query": prefix, "type": "bool_prefix", "fields": fields}}
+    return {
+        "multi_match": {"query": prefix, "type": "bool_prefix", "fields": fields, "operator": "and"}
+    }
 
 
 # ---------- "did you mean" ----------
 
 
-def build_suggesters(words: list[str]) -> dict[str, Any]:
-    """One term suggester per word that may be misspelled.
+def _check_words(words: Sequence[str]) -> None:
+    """The words of one query: a list of str, no more than a query can hold."""
+    if isinstance(words, str) or not isinstance(words, Sequence):
+        raise TypeError("words must be a list of words")
+    if len(words) > MAX_QUERY_LENGTH:
+        raise ValueError(f"a query has at most {MAX_QUERY_LENGTH} words")
+    if not all(isinstance(word, str) for word in words):
+        raise TypeError("every word must be a str")
 
-    Each word gets the same number of allowed typos as fuzziness AUTO (and as
-    our ``SpellingIndex``): none up to 2 letters, 1 up to 5, then 2.
+
+def build_suggest_request(words: Sequence[str], fields: Iterable[str]) -> dict[str, Any]:
+    """The "did you mean" request for a query's words, or {} if none may be misspelled.
+
+    Each word that may be misspelled gets a term suggester, with the same
+    number of allowed typos as fuzziness AUTO (and as our ``SpellingIndex``):
+    none up to 2 letters, 1 up to 5, then 2. The suggester only knows the
+    words of the spelling field, which are not stemmed. So the request also
+    counts the documents each word matches in the searched fields, where it
+    is stemmed: a word that matches a document is known, and stays as it is,
+    as ``InvertedIndex.suggest`` keeps a word whose stem is in the index.
     """
+    _check_words(words)
+    names = check_field_names(fields)
     suggesters: dict[str, Any] = {}
+    known: dict[str, Any] = {}
     for i, word in enumerate(words):
         edits = max_edits_auto(word)
         if edits and is_searchable(word):
@@ -228,23 +270,32 @@ def build_suggesters(words: list[str]) -> dict[str, Any]:
                 "text": word,
                 "term": {
                     "field": SPELLING_FIELD,
-                    "suggest_mode": "missing",  # only fix words the index does not know
+                    "suggest_mode": "missing",  # only fix words the spelling field lacks
                     "max_edits": edits,
                     "prefix_length": 0,  # allow a typo in the first letter too
                     "min_word_length": 1,
                 },
             }
-    return suggesters
+            known[f"word{i}"] = {"multi_match": {"query": word, "fields": list(names)}}
+    if len(suggesters) > MAX_QUERY_TERMS:
+        raise ValueError(f"queries are limited to {MAX_QUERY_TERMS} terms")
+    if not suggesters:
+        return {}
+    return {"suggest": suggesters, "aggs": {"known": {"filters": {"filters": known}}}}
 
 
-def apply_suggestions(words: list[str], suggest: Mapping[str, Any]) -> str | None:
-    """Rebuild the query with each misspelled word replaced by its best fix."""
+def apply_suggestions(words: Sequence[str], response: Mapping[str, Any]) -> str | None:
+    """Rebuild the query with each unknown, misspelled word replaced by its best fix."""
+    _check_words(words)
+    suggest = response.get("suggest", {})
+    known = response.get("aggregations", {}).get("known", {}).get("buckets", {})
     fixed = []
     for i, word in enumerate(words):
         entries = suggest.get(f"word{i}") or [{"options": []}]
         options = entries[0]["options"]
-        fixed.append(str(options[0]["text"]) if options else word)
-    return " ".join(fixed) if fixed != words else None
+        matches = known.get(f"word{i}", {}).get("doc_count", 0)
+        fixed.append(str(options[0]["text"]) if options and not matches else word)
+    return " ".join(fixed) if fixed != list(words) else None
 
 
 # ---------- explanations ----------

@@ -13,18 +13,26 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`pip install -e ".[es]"`):
   - A custom analyzer with the same steps as ours, one shard and the same
     BM25 parameters, so word queries (OR and AND, any field weights, through
-    `combined_fields`) get the same scores as the from-scratch engine.
+    `combined_fields`) get the same scores as the from-scratch engine, and
+    equal scores are sorted by document id in both.
   - Bulk loading with `create` actions, so a duplicate id is an error rather
-    than an overwrite.
+    than an overwrite, in requests of at most 500 documents or about 10 MB.
+    An existing index is reused only if it was made with the same BM25
+    parameters and mappings; it may be an alias of one index.
   - Facet counts per category with a `post_filter`, HTML-escaped highlighted
-    snippets, title autocomplete (`search_as_you_type`), "did you mean" (a
-    term suggester), fuzzy search, and Elasticsearch's `_explain`.
+    snippets (also for fields over a million characters), title autocomplete
+    (`search_as_you_type`, every typed word must match), "did you mean" (a
+    term suggester that leaves words matching a document alone), fuzzy
+    search, and Elasticsearch's `_explain`.
   - Every request is built as plain data by `searchengine.es_dsl`, so it can
     be tested without a server.
 - `searchengine --engine es`, with `--index`, `--reindex` and `--category`.
+  It checks the query, and with `--reindex` reads the whole data file, before
+  it touches the index, and it deletes a half-built index on an error or on
+  Ctrl-C. Errors, timeouts included, are one-line messages.
 - Integration tests that run both engines side by side on a real
   Elasticsearch (`make integration`), and a CI job that runs them against an
-  Elasticsearch service container.
+  Elasticsearch service container. The release workflow runs them too.
 - Dependabot updates for the Elasticsearch image.
 - `LEARNING.md` chapter 4: the same engine on Elasticsearch.
 

@@ -4,7 +4,7 @@ searchengine "inverted index"
 searchengine --fuzzy "elastisearch rankng"
 searchengine --ranker tfidf '"search engine"'
 searchengine --explain "bm25 ranking"
-searchengine --engine es "inverted index"          # Elasticsearch: docker compose up -d
+searchengine --engine es "inverted index"          # Elasticsearch: docker compose up -d --wait
 searchengine --engine es --category indexing "index"
 """
 
@@ -13,8 +13,8 @@ from __future__ import annotations
 import argparse
 import html
 import sys
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from .datasets import SAMPLE, load_jsonl
 from .es_dsl import explanation_lines
@@ -64,7 +64,8 @@ def main(argv: Sequence[str] | None = None, *, es_client: Elasticsearch | None =
     args = parser.parse_args(argv)
     if not 1 <= args.k <= MAX_RESULTS:
         parser.error(f"-k must be between 1 and {MAX_RESULTS}")
-    if args.engine == "scratch" and (args.index or args.reindex or args.category):
+    es_only = (args.index, args.category)
+    if args.engine == "scratch" and (args.reindex or any(arg is not None for arg in es_only)):
         parser.error("--index, --reindex and --category need --engine es")
     options = SearchOptions(ranker=args.ranker, mode=args.mode, fuzzy=args.fuzzy)
     try:
@@ -107,6 +108,7 @@ def _run_elasticsearch(
     # from-scratch engine must work without it.
     try:
         from elastic_transport import ConnectionError as TransportConnectionError  # noqa: PLC0415
+        from elastic_transport import TransportError  # noqa: PLC0415
         from elasticsearch import ApiError  # noqa: PLC0415
 
         from . import es_engine  # noqa: PLC0415
@@ -117,30 +119,37 @@ def _run_elasticsearch(
             file=sys.stderr,
         )
         return 1
-    engine = es_engine.ElasticsearchEngine(client, index=args.index or es_engine.DEFAULT_INDEX)
+    index = es_engine.DEFAULT_INDEX if args.index is None else args.index
+    engine = es_engine.ElasticsearchEngine(client, index=index)
     try:
+        # Check the query, and with --reindex read the whole file, before the
+        # index is touched: a typo must not cost the index that is there.
+        engine.search_body(args.query, k=args.k, options=options, category=args.category)
+        documents = list(load_jsonl(args.data)) if args.reindex else None
         if engine.create_index(recreate=args.reindex):
-            _fill(engine, args.data)
+            _fill(engine, load_jsonl(args.data) if documents is None else documents)
         _print_es_results(engine, args, options)
     except TransportConnectionError:
         url = es_engine.default_url()
         print(
             f"searchengine: error: cannot reach Elasticsearch at {url}. "
-            "Start it with: docker compose up -d",
+            "Start it with: docker compose up -d --wait",
             file=sys.stderr,
         )
         return 1
-    except (ApiError, es_engine.IndexingError) as error:
+    except (ApiError, TransportError, es_engine.IndexingError) as error:
+        # TransportError: a timeout, or an answer that is not JSON.
         print(f"searchengine: error: Elasticsearch: {error}", file=sys.stderr)
         return 1
     return 0
 
 
-def _fill(engine: ElasticsearchEngine, data: str) -> None:
+def _fill(engine: ElasticsearchEngine, documents: Iterable[Mapping[str, Any]]) -> None:
     try:
-        engine.index_documents(load_jsonl(data))
-    except Exception:
-        engine.delete_index()  # never leave a half-built index behind
+        engine.index_documents(documents)
+    except BaseException:
+        # Never leave a half-built index behind: not on an error, not on Ctrl-C.
+        engine.delete_index()
         raise
 
 

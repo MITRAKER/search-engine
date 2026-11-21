@@ -1,6 +1,6 @@
 """Both engines side by side, on a real Elasticsearch.
 
-These tests need a running Elasticsearch (``docker compose up -d``) at
+These tests need a running Elasticsearch (``docker compose up -d --wait``) at
 $ES_URL, default http://localhost:9200. Without one they are skipped, unless
 REQUIRE_ES=1 is set, as in CI, where a missing server is a failure.
 
@@ -35,6 +35,9 @@ QUERIES = [
 ]
 WEIGHTINGS = [None, {"body": 1.0}, {"title": 1.0}, {"title": 1.7, "body": 1.3}]
 PHRASES = ['"inverted index"', '"search engine"', '"ranking function"']
+WORDS = ["ranking", "search", "index", "query", "score", "document", "elasticsearch", "lucene"]
+# Correctly spelled words whose stems are in the index, a typo, and a fine query.
+SUGGEST = ["analyzer", "ranked", "indexed", "tokenizes", "lucen", "elastisearch rankng", "bm25"]
 TOLERANCE = 1e-6  # Lucene computes in 32-bit floats
 
 
@@ -52,7 +55,7 @@ def _reachable(url: str) -> bool:
 def client() -> Iterator[Elasticsearch]:
     url = default_url()
     if not _reachable(url):
-        message = f"no Elasticsearch at {url} (start it with: docker compose up -d)"
+        message = f"no Elasticsearch at {url} (start it: docker compose up -d --wait)"
         if os.environ.get("REQUIRE_ES") == "1":
             pytest.fail(message)
         pytest.skip(message)
@@ -140,7 +143,7 @@ def test_elasticsearch_multiplies_a_phrase_score_by_the_weight(engines):
     assert twice.score == pytest.approx(2 * once.score, rel=TOLERANCE)
 
 
-@pytest.mark.parametrize(("text", "terms"), GOLDEN["analyzer"][:12])
+@pytest.mark.parametrize(("text", "terms"), GOLDEN["analyzer"])
 def test_same_terms(engines, text, terms):
     _, es = engines
     expected = [(token.term, token.position) for token in analyze_tokens(text)]
@@ -165,12 +168,32 @@ def test_facets_count_every_category_and_the_filter_applies_after(engines):
     assert {hit.doc_id for hit in ranking.hits} < {hit.doc_id for hit in everything.hits}
 
 
-def test_did_you_mean_and_autocomplete(engines):
+@pytest.mark.parametrize("query", WORDS)
+def test_ties_are_broken_by_id_in_both_engines(engines, query):
+    """Where k cuts through equal scores, both engines keep the same documents."""
     scratch, es = engines
+    for k in range(1, 11):
+        ours = [hit.doc_id for hit in scratch.search(query, k=k)]
+        assert [hit.doc_id for hit in es.search(query, k=k).hits] == ours, k
+
+
+def test_did_you_mean_and_autocomplete(engines):
+    _, es = engines
     assert es.suggest("elastisearch rankng") == "elasticsearch ranking"
-    assert es.suggest("elastisearch rankng") == scratch.suggest("elastisearch rankng")
     assert es.suggest("inverted index") is None
     assert "Inverted index" in es.autocomplete("inverted ind")
+
+
+@pytest.mark.parametrize("query", SUGGEST)
+def test_did_you_mean_agrees_with_our_engine(engines, query):
+    scratch, es = engines
+    assert es.suggest(query) == scratch.suggest(query)
+
+
+def test_autocomplete_needs_every_typed_word(engines):
+    _, es = engines
+    assert es.autocomplete("inverted xyz") == []
+    assert es.autocomplete("zebra ind") == []
 
 
 def test_fuzzy_search_finds_the_misspelled_words(engines):
@@ -186,6 +209,47 @@ def test_count_and_existing_index(engines, client):
     assert ElasticsearchEngine(client, index=es.index).create_index() is False
     with pytest.raises(ValueError, match="recreate"):
         ElasticsearchEngine(client, index=es.index, k1=2.0).create_index()
+
+
+def test_an_index_made_for_other_fields_is_refused(engines, client):
+    _, es = engines
+    other = ElasticsearchEngine(client, index=es.index, fields=["title", "body", "abstract"])
+    with pytest.raises(ValueError, match="maps 'abstract' differently"):
+        other.create_index()
+
+
+def test_an_alias_of_the_index_can_be_used(engines, client):
+    _, es = engines
+    alias = f"{es.index}-alias"
+    client.indices.put_alias(index=es.index, name=alias)
+    try:
+        engine = ElasticsearchEngine(client, index=alias)
+        assert engine.create_index() is False
+        assert engine.search("inverted index", k=3).hits
+    finally:
+        client.indices.delete_alias(index=es.index, name=alias)
+
+
+def test_documents_need_an_existing_index(client):
+    engine = ElasticsearchEngine(client, index=f"test-missing-{os.getpid()}")
+    engine.delete_index()
+    with pytest.raises(ValueError, match="does not exist"):
+        engine.index_documents([{"id": "1", "body": "x"}])
+    assert not client.indices.exists(index=engine.index)
+
+
+def test_a_field_longer_than_the_highlight_limit_is_still_searched(scratch_index):
+    """Elasticsearch highlights at most 1,000,000 characters of a field."""
+    docs = [
+        {"id": "1", "title": "long", "body": "search " + "lorem ipsum " * 90_000},
+        {"id": "2", "title": "short", "body": "search me"},
+    ]
+    scratch_index.index_documents(docs)
+    ours = InvertedIndex()
+    ours.add_many(docs)
+    result = scratch_index.search("search")
+    compare(ours.search("search"), result.hits)
+    assert all(hit.highlights for hit in result.hits)
 
 
 def test_snippets_are_escaped_html(scratch_index):

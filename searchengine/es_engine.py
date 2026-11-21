@@ -13,6 +13,7 @@ It needs the optional ``elasticsearch`` package: ``pip install -e ".[es]"``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -21,7 +22,7 @@ from typing import Any, Final
 
 from elasticsearch import Elasticsearch, NotFoundError
 
-from .analyzer import is_searchable, tokenize
+from .analyzer import tokenize
 from .es_dsl import (
     ANALYZER,
     SPELLING_FIELD,
@@ -29,27 +30,29 @@ from .es_dsl import (
     autocomplete_query,
     build_query,
     build_search_body,
-    build_suggesters,
+    build_suggest_request,
     check_fields,
     index_mappings,
     index_settings,
 )
 from .index import (
     DEFAULT_FIELDS,
-    MAX_QUERY_TERMS,
     SearchOptions,
     check_options,
     normalize_doc_id,
     normalize_document,
     resolve_field_weights,
+    split_phrase,
 )
 from .scoring import DEFAULT_B, DEFAULT_K1
 
 DEFAULT_INDEX: Final = "searchengine"
 MAX_AUTOCOMPLETE: Final = 20
-MAX_PREFIX_LENGTH: Final = 256  # characters, for autocomplete
 MAX_ANALYZE_LENGTH: Final = 10_000  # characters; Elasticsearch stops _analyze at 10,000 tokens
 BULK_CHUNK_SIZE: Final = 500  # documents per bulk request
+# Bytes of documents per bulk request. Elasticsearch refuses a request over
+# http.max_content_length (100 MB), and a document may be 10 MB.
+BULK_CHUNK_BYTES: Final = 10 * 2**20
 _INDEX_NAME: Final = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
 
 
@@ -105,10 +108,16 @@ class ElasticsearchEngine:
     # ---------- managing the index ----------
 
     def create_index(self, *, recreate: bool = False) -> bool:
-        """Create the index. Returns False if it already existed and was kept."""
+        """Create the index. Returns False if it already existed and was kept.
+
+        An existing index is kept only if it was made like this engine would
+        make it: with the same k1 and b, and our analyzer on every field.
+        """
+        if not isinstance(recreate, bool):
+            raise TypeError("recreate must be True or False")
         exists = bool(self.client.indices.exists(index=self.index))
         if exists and not recreate:
-            self._check_similarity()
+            self._check_index()
             return False
         if exists:
             self.client.indices.delete(index=self.index)
@@ -117,16 +126,31 @@ class ElasticsearchEngine:
         )
         return True
 
-    def _check_similarity(self) -> None:
-        """An index made with other BM25 settings would score differently."""
+    def _only(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """The entry of a per-index answer. The name may be an alias of several indices."""
+        entries = list(body.values())
+        if len(entries) != 1:
+            raise ValueError(f"{self.index!r} names {len(entries)} indices, not one")
+        return dict(entries[0])
+
+    def _check_index(self) -> None:
+        """An index made with other settings or fields would score differently."""
         response = self.client.indices.get_settings(index=self.index, flat_settings=True)
-        settings = response.body[self.index]["settings"]
+        settings = self._only(response.body)["settings"]
         prefix = "index.similarity.default."
         found = (settings.get(prefix + "k1"), settings.get(prefix + "b"))
         if None in found or (float(found[0]), float(found[1])) != (self.k1, self.b):
             raise ValueError(
                 f"index {self.index!r} has k1, b = {found}, not {(self.k1, self.b)}; recreate it"
             )
+        mappings = self._only(self.client.indices.get_mapping(index=self.index).body)
+        properties = mappings["mappings"].get("properties", {})
+        ours = {name: {"type": "text", "analyzer": ANALYZER} for name in self.fields}
+        ours["id"] = {"type": "keyword"}
+        for name, expected in ours.items():
+            mapped = properties.get(name, {})
+            if any(mapped.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"index {self.index!r} maps {name!r} differently; recreate it")
 
     def delete_index(self) -> None:
         """Delete the index, if it exists."""
@@ -135,23 +159,28 @@ class ElasticsearchEngine:
     def index_documents(self, docs: Iterable[Mapping[str, Any]]) -> int:
         """Add documents with the bulk API, then refresh so they are searchable.
 
-        Each document is checked like ``InvertedIndex.add``. A bulk request
-        holds an action line and a source line per document. We use the
-        ``create`` action, not ``index``, so a duplicate id is an error instead
-        of a silent overwrite. Unlike our engine, Elasticsearch has no
-        transactions: documents sent before a failure stay indexed.
+        The index must exist (``create_index``): otherwise Elasticsearch would
+        make one with its default analyzer. Each document is checked like
+        ``InvertedIndex.add``. A bulk request holds an action line and a source
+        line per document, for at most BULK_CHUNK_SIZE documents and about
+        BULK_CHUNK_BYTES bytes. We use the ``create`` action, not ``index``, so
+        a duplicate id is an error instead of a silent overwrite. As with
+        ``InvertedIndex.add_many``, documents added before a failure stay.
         """
-        added = 0
+        if not self.client.indices.exists(index=self.index):
+            raise ValueError(f"index {self.index!r} does not exist: create it first")
+        added, size = 0, 0
         operations: list[dict[str, Any]] = []
         for doc in docs:
-            source = normalize_document(doc)
-            doc_id = source.pop("id")
+            source = normalize_document(doc)  # keeps "id": the index sorts ties by it
+            doc_id = source["id"]
             if SPELLING_FIELD in source:
                 raise ValueError(f"document {doc_id}: field {SPELLING_FIELD!r} is reserved")
             operations += [{"create": {"_index": self.index, "_id": doc_id}}, source]
-            if len(operations) == 2 * BULK_CHUNK_SIZE:
+            size += len(json.dumps(source, ensure_ascii=False).encode("utf-8"))
+            if len(operations) == 2 * BULK_CHUNK_SIZE or size >= BULK_CHUNK_BYTES:
                 added += self._bulk(operations)
-                operations = []
+                operations, size = [], 0
         if operations:
             added += self._bulk(operations)
         self.client.indices.refresh(index=self.index)
@@ -181,9 +210,25 @@ class ElasticsearchEngine:
         options = SearchOptions(k1=self.k1, b=self.b) if options is None else options
         check_options(options)
         if (options.k1, options.b) != (self.k1, self.b):
-            raise ValueError("k1 and b are fixed when the Elasticsearch index is created")
+            raise ValueError(
+                "k1 and b are settings of the Elasticsearch index: "
+                "use the index's values, or recreate it with new ones"
+            )
         weights = resolve_field_weights(self.fields, field_weights)
         return build_query(query, options, weights), list(weights)
+
+    def search_body(
+        self,
+        query: str,
+        *,
+        k: int = 10,
+        options: SearchOptions | None = None,
+        field_weights: Mapping[str, float] | None = None,
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """The request ``search`` sends, after checking every argument."""
+        es_query, fields = self._query(query, options, field_weights)
+        return build_search_body(es_query, k, fields, category)
 
     def search(
         self,
@@ -195,8 +240,9 @@ class ElasticsearchEngine:
         category: str | None = None,
     ) -> EsResult:
         """Search, optionally in one category. Same arguments as ``InvertedIndex.search``."""
-        es_query, fields = self._query(query, options, field_weights)
-        body = build_search_body(es_query, k, fields, category)
+        body = self.search_body(
+            query, k=k, options=options, field_weights=field_weights, category=category
+        )
         response = self.client.search(index=self.index, **body).body
         hits = [
             EsHit(
@@ -235,28 +281,27 @@ class ElasticsearchEngine:
         return dict(response.body)
 
     def suggest(self, query: str) -> str | None:
-        """'Did you mean ...?' from Elasticsearch's term suggester."""
+        """'Did you mean ...?' from Elasticsearch's term suggester.
+
+        The query is checked like ``InvertedIndex.suggest`` checks it.
+        """
+        split_phrase(query)  # a str, within the length limit
         words = tokenize(query)
-        if sum(1 for word in words if is_searchable(word)) > MAX_QUERY_TERMS:
-            raise ValueError(f"queries are limited to {MAX_QUERY_TERMS} terms")
-        suggesters = build_suggesters(words)
-        if not suggesters:
+        request = build_suggest_request(words, self.fields)
+        if not request:
             return None
-        response = self.client.search(index=self.index, size=0, suggest=suggesters)
-        return apply_suggestions(words, response.body["suggest"])
+        response = self.client.search(index=self.index, size=0, **request)
+        return apply_suggestions(words, response.body)
 
     def autocomplete(self, prefix: str, *, k: int = 5) -> list[str]:
-        """Titles that complete what the user has typed so far."""
-        if not isinstance(prefix, str):
-            raise TypeError("prefix must be a str")
-        if len(prefix) > MAX_PREFIX_LENGTH:
-            raise ValueError(f"prefix is longer than {MAX_PREFIX_LENGTH} characters")
+        """Titles that contain every word typed so far, the last one maybe in part."""
+        query = autocomplete_query(prefix)  # checks the prefix
         if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= MAX_AUTOCOMPLETE:
             raise ValueError(f"k must be an int between 1 and {MAX_AUTOCOMPLETE}")
         if "title" not in self.fields or not prefix.strip():
             return []
         response = self.client.search(
-            index=self.index, size=k, query=autocomplete_query(prefix), source_includes=["title"]
+            index=self.index, size=k, query=query, source_includes=["title"]
         )
         titles = [str(hit["_source"].get("title", "")) for hit in response.body["hits"]["hits"]]
         return list(dict.fromkeys(title for title in titles if title))
