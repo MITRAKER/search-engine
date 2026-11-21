@@ -20,8 +20,8 @@ types:  ## strict type checks with mypy
 jpl:  ## check the NASA/JPL Power of Ten rules
 	python scripts/check_jpl.py searchengine scripts tests
 
-test:  ## run the tests with coverage
-	pytest --cov --cov-fail-under=95
+test:  ## run the tests with coverage (not the integration tests)
+	pytest -m "not integration" --cov --cov-fail-under=95
 
 integration:  ## both engines on a live Elasticsearch (first: docker compose up -d)
 	REQUIRE_ES=1 pytest -m integration

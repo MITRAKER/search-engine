@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -14,10 +16,17 @@ def compose_image() -> str:
     return match.group(1)
 
 
-def test_ci_tests_against_the_same_elasticsearch_as_local_development():
-    """Dependabot updates docker-compose.yml, not the CI service: keep them in step."""
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
-    assert f"image: {compose_image()}" in ci
+@pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
+def test_ci_tests_against_the_same_elasticsearch_as_local_development(workflow):
+    """Dependabot updates docker-compose.yml, not the workflows: keep them in step."""
+    text = (ROOT / ".github" / "workflows" / workflow).read_text("utf-8")
+    assert f"image: {compose_image()}" in text
+
+
+def test_the_release_runs_the_integration_tests_too():
+    """A tag on a commit whose integration tests fail must not be released."""
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text("utf-8")
+    assert 'REQUIRE_ES: "1"' in release
 
 
 def test_the_golden_file_was_recorded_with_that_elasticsearch():

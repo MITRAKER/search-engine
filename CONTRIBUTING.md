@@ -38,7 +38,7 @@ GitHub's dependency review, so a pull request can still fail on something
 | Format | `ruff format .` | inconsistent style (it fixes it for you) |
 | Types | `mypy` | type errors, unhandled `None`, wrong arguments |
 | JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, shared state, dynamic code |
-| Tests | `pytest --cov` | broken behavior; coverage must stay at 95% or higher |
+| Tests | `pytest -m "not integration" --cov` | broken behavior; coverage must stay at 95% or higher |
 | Integration | `make integration` | the two engines disagreeing on a real Elasticsearch (see below) |
 | Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
@@ -61,7 +61,7 @@ Elasticsearch, the parity tests should fail, and the difference needs a
 documented reason.
 
 ```bash
-docker compose up -d                       # Elasticsearch on localhost:9200
+docker compose up -d --wait                # Elasticsearch on localhost:9200
 python scripts/make_parity_golden.py       # rewrites tests/data/es_parity.json
 git diff --stat tests/data                 # review what changed
 ```
@@ -74,13 +74,14 @@ scores. Without a server these tests are skipped. CI runs them in their own
 job, with `REQUIRE_ES=1`, which turns a missing server into a failure.
 
 ```bash
-docker compose up -d          # Elasticsearch on localhost:9200, or set ES_URL
+docker compose up -d --wait   # Elasticsearch on localhost:9200, or set ES_URL
 make integration              # REQUIRE_ES=1 pytest -m integration
 ```
 
-To move to a new Elasticsearch version, change the image in both
-`docker-compose.yml` and `.github/workflows/ci.yml` (a test checks that they
-match), then record the golden file again.
+To move to a new Elasticsearch version, change the image in
+`docker-compose.yml`, `.github/workflows/ci.yml` and
+`.github/workflows/release.yml` (a test checks that they match), then record
+the golden file again.
 
 ## Making a change
 
@@ -109,5 +110,6 @@ match), then record the golden file again.
    git push origin v0.2.0
    ```
 
-The release workflow checks the tag matches the version, runs the tests,
-builds the package and publishes a GitHub Release with the changelog notes.
+The release workflow checks the tag matches the version, runs all the tests
+(the integration tests too, on its own Elasticsearch), builds the package and
+publishes a GitHub Release with the changelog notes.

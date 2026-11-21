@@ -1,5 +1,5 @@
 # A single-node Elasticsearch for local development and the integration tests.
-#   docker compose up -d        start it
+#   docker compose up -d --wait start it, and wait until it is healthy
 #   curl localhost:9200          check it is up
 #   docker compose down -v      stop it and delete its data
 services:
