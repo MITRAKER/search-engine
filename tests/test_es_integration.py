@@ -218,6 +218,18 @@ def test_an_index_made_for_other_fields_is_refused(engines, client):
         other.create_index()
 
 
+def test_scores_equal_in_exact_arithmetic_tie_in_both_engines(scratch_index):
+    # Our 64-bit sums differ in the last bit; Lucene's 32-bit scores are equal.
+    docs = [{"id": "1", "body": "x x x y y y z z z z"}, {"id": "2", "body": "x x x y y y y z z z"}]
+    scratch = InvertedIndex()
+    scratch.add_many(docs)
+    scratch_index.index_documents(docs)
+    for k in (1, 2):
+        ours = [hit.doc_id for hit in scratch.search("x y z", k=k)]
+        theirs = [hit.doc_id for hit in scratch_index.search("x y z", k=k).hits]
+        assert theirs == ours == ["1", "2"][:k]
+
+
 def test_an_alias_of_the_index_can_be_used(engines, client):
     _, es = engines
     alias = f"{es.index}-alias"

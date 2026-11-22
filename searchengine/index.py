@@ -21,6 +21,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import json
+from array import array
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -579,7 +580,8 @@ class InvertedIndex:
     ) -> list[Hit]:
         """Return the k best documents for ``query``, best first.
 
-        Ties are broken by document id, so results are always reproducible.
+        Scores are 32-bit floats, as in Lucene. Ties are broken by document
+        id, so results are always reproducible.
         """
         if isinstance(k, bool) or not isinstance(k, int):
             raise TypeError("k must be an int")
@@ -587,7 +589,12 @@ class InvertedIndex:
             raise ValueError(f"k must be between 1 and {MAX_RESULTS}")
         clauses, weights, options = self._prepare(query, options, field_weights)
         scores = self._score_docs(clauses, weights, options)
-        best = heapq.nsmallest(k, scores.items(), key=lambda item: (-item[1], item[0]))
+        # Lucene's scores are 32-bit floats. Two scores that are equal in exact
+        # arithmetic can differ in the last bits of our 64-bit sums, and would
+        # not tie; rounded like Lucene's, they tie, and both engines sort them
+        # by id. array("f") rounds them all at once.
+        rounded = zip(scores, array("f", scores.values()).tolist(), strict=True)
+        best = heapq.nsmallest(k, rounded, key=lambda item: (-item[1], item[0]))
         return [Hit(doc_id, score, self.docs[doc_id].get("title", "")) for doc_id, score in best]
 
     def explain(
@@ -600,9 +607,10 @@ class InvertedIndex:
     ) -> list[ClauseScore]:
         """Break one document's score down by query clause. Great for learning.
 
-        The parts add up to the document's score in ``search``, whether or
-        not the document makes the top k. A document that does not match the
-        query (in AND mode: not every word of it) gets an empty list.
+        The parts add up to the document's score in ``search`` (before it is
+        rounded to a 32-bit float), whether or not the document makes the top
+        k. A document that does not match the query (in AND mode: not every
+        word of it) gets an empty list.
         """
         doc_id = normalize_doc_id(doc_id)
         clauses, weights, options = self._prepare(query, options, field_weights)
