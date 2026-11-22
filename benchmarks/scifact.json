@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "collection": "SciFact (dev claims)",
+  "documents": 5183,
+  "queries": 300,
+  "k": 10,
+  "depth": 100,
+  "trials": 10000,
+  "index_seconds": {
+    "scratch": 4.778,
+    "es": 3.286
+  },
+  "environment": {
+    "python": "3.13.18",
+    "machine": "x86_64",
+    "elasticsearch": "9.5.5"
+  },
+  "systems": [
+    {
+      "name": "BM25F, title x3",
+      "engine": "scratch",
+      "quality": {
+        "nDCG@10": 0.686019,
+        "MRR@10": 0.650451,
+        "P@10": 0.09,
+        "Recall@100": 0.927556,
+        "MAP@100": 0.644997
+      },
+      "p_value": null,
+      "latency_ms": {
+        "mean": 16.814,
+        "p50": 15.307,
+        "p95": 34.631,
+        "p99": 42.671
+      },
+      "server_latency_ms": null
+    },
+    {
+      "name": "BM25F, equal weights",
+      "engine": "scratch",
+      "quality": {
+        "nDCG@10": 0.67983,
+        "MRR@10": 0.644247,
+        "P@10": 0.089333,
+        "Recall@100": 0.927556,
+        "MAP@100": 0.639282
+      },
+      "p_value": 0.1305,
+      "latency_ms": {
+        "mean": 17.787,
+        "p50": 16.139,
+        "p95": 38.926,
+        "p99": 44.906
+      },
+      "server_latency_ms": null
+    },
+    {
+      "name": "TF-IDF, title x3",
+      "engine": "scratch",
+      "quality": {
+        "nDCG@10": 0.652444,
+        "MRR@10": 0.613784,
+        "P@10": 0.087333,
+        "Recall@100": 0.909222,
+        "MAP@100": 0.60709
+      },
+      "p_value": 0.0003,
+      "latency_ms": {
+        "mean": 6.579,
+        "p50": 5.906,
+        "p95": 14.32,
+        "p99": 16.921
+      },
+      "server_latency_ms": null
+    },
+    {
+      "name": "combined_fields, title x3",
+      "engine": "es",
+      "quality": {
+        "nDCG@10": 0.686019,
+        "MRR@10": 0.650451,
+        "P@10": 0.09,
+        "Recall@100": 0.927556,
+        "MAP@100": 0.644997
+      },
+      "p_value": 1.0,
+      "latency_ms": {
+        "mean": 8.256,
+        "p50": 7.682,
+        "p95": 11.57,
+        "p99": 17.918
+      },
+      "server_latency_ms": {
+        "mean": 5.517,
+        "p50": 5.0,
+        "p95": 8.0,
+        "p99": 14.08
+      }
+    },
+    {
+      "name": "best_fields, tie_breaker 0.5",
+      "engine": "es",
+      "quality": {
+        "nDCG@10": 0.690402,
+        "MRR@10": 0.656446,
+        "P@10": 0.090667,
+        "Recall@100": 0.914222,
+        "MAP@100": 0.650066
+      },
+      "p_value": 0.513,
+      "latency_ms": {
+        "mean": 7.287,
+        "p50": 7.012,
+        "p95": 9.773,
+        "p99": 14.731
+      },
+      "server_latency_ms": {
+        "mean": 4.943,
+        "p50": 5.0,
+        "p95": 7.0,
+        "p99": 12.01
+      }
+    }
+  ]
+}
