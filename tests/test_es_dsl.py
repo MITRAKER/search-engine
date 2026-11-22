@@ -14,6 +14,7 @@ from searchengine import ENGLISH_STOPWORDS, SearchOptions
 from searchengine.analyzer import MAX_TOKEN_LENGTH
 from searchengine.es_dsl import (
     ANALYZER,
+    BEST_FIELDS_TIE_BREAKER,
     FACET_FIELD,
     HIGHLIGHT_MAX_OFFSET,
     HIGHLIGHT_TAGS,
@@ -28,6 +29,7 @@ from searchengine.es_dsl import (
     apply_suggestions,
     autocomplete_query,
     build_query,
+    build_rank_body,
     build_search_body,
     build_suggest_request,
     check_fields,
@@ -183,6 +185,34 @@ def test_queries_the_engine_cannot_run_are_refused(query, options, message):
         build_query(query, options, WEIGHTS)
 
 
+@pytest.mark.parametrize("mode", ["or", "and"])
+def test_best_fields_scores_each_field_on_its_own_like_beirs_baseline(mode):
+    query = build_query("inverted index", SearchOptions(mode=mode), WEIGHTS, "best_fields")
+    assert query == {
+        "multi_match": {
+            "query": "inverted index",
+            "type": "best_fields",
+            "fields": ["title^3.0", "body^1.0"],
+            "operator": mode,  # with "and", every word in the same field
+            "tie_breaker": BEST_FIELDS_TIE_BREAKER,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "options"),
+    [('"search engine"', SearchOptions()), ("rankng", SearchOptions(fuzzy=True))],
+)
+def test_best_fields_leaves_phrases_and_fuzzy_queries_as_they_are(text, options):
+    best_fields = build_query(text, options, WEIGHTS, "best_fields")
+    assert best_fields == build_query(text, options, WEIGHTS)
+
+
+def test_the_query_type_is_checked():
+    with pytest.raises(ValueError, match="query_type must be combined_fields or best_fields"):
+        build_query("x", SearchOptions(), WEIGHTS, "cross_fields")  # type: ignore[arg-type]
+
+
 def test_options_must_be_search_options():
     with pytest.raises(TypeError, match="SearchOptions"):
         build_query("x", {"mode": "and"}, WEIGHTS)  # type: ignore[arg-type]
@@ -229,6 +259,30 @@ def test_search_body_checks_the_query_and_fields(query, fields, error):
 def test_search_body_checks_k(k):
     with pytest.raises(ValueError, match="k must be"):
         build_search_body({"match_all": {}}, k, ["body"], None)
+
+
+def test_rank_body_asks_only_for_ids_and_scores_in_our_order():
+    assert build_rank_body({"match_all": {}}, 7) == {
+        "query": {"match_all": {}},
+        "size": 7,
+        "sort": [{"_score": "desc"}, {"id": "asc"}],  # ties by id, like InvertedIndex
+        "source": False,  # no document text
+        "track_total_hits": False,  # no exact count
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "k", "error"),
+    [
+        ("match_all", 10, TypeError),
+        ({"match_all": {}}, 0, ValueError),
+        ({"match_all": {}}, MAX_RESULTS + 1, ValueError),
+        ({"match_all": {}}, True, ValueError),
+    ],
+)
+def test_rank_body_checks_the_query_and_k(query, k, error):
+    with pytest.raises(error):
+        build_rank_body(query, k)
 
 
 @pytest.mark.parametrize("category", ["", "x" * (MAX_CATEGORY_LENGTH + 1), 3])

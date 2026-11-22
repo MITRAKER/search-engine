@@ -26,9 +26,11 @@ from .analyzer import tokenize
 from .es_dsl import (
     ANALYZER,
     SPELLING_FIELD,
+    QueryType,
     apply_suggestions,
     autocomplete_query,
     build_query,
+    build_rank_body,
     build_search_body,
     build_suggest_request,
     check_fields,
@@ -84,6 +86,15 @@ class EsResult:
     total: int
     facets: dict[str, int]
     took_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class EsRanking:
+    """Only the ranking: document ids and scores, best first (for benchmarks)."""
+
+    doc_ids: list[str]
+    scores: list[float]
+    took_ms: int  # Elasticsearch's own time, without the trip over the network
 
 
 class ElasticsearchEngine:
@@ -254,7 +265,11 @@ class ElasticsearchEngine:
     # ---------- searching ----------
 
     def _query(
-        self, query: str, options: SearchOptions | None, field_weights: Mapping[str, float] | None
+        self,
+        query: str,
+        options: SearchOptions | None,
+        field_weights: Mapping[str, float] | None,
+        query_type: QueryType = "combined_fields",
     ) -> tuple[dict[str, Any], list[str]]:
         options = SearchOptions(k1=self.k1, b=self.b) if options is None else options
         check_options(options)
@@ -264,7 +279,30 @@ class ElasticsearchEngine:
                 "use the index's values, or recreate it with new ones"
             )
         weights = resolve_field_weights(self.fields, field_weights)
-        return build_query(query, options, weights), list(weights)
+        return build_query(query, options, weights, query_type), list(weights)
+
+    def rank(
+        self,
+        query: str,
+        *,
+        k: int = 10,
+        options: SearchOptions | None = None,
+        field_weights: Mapping[str, float] | None = None,
+        query_type: QueryType = "combined_fields",
+    ) -> EsRanking:
+        """Rank only: the ids and scores of the k best documents, for benchmarks.
+
+        ``query_type="best_fields"`` scores each field on its own instead of
+        as one (BM25F), like BEIR's Elasticsearch baseline.
+        """
+        es_query, _ = self._query(query, options, field_weights, query_type)
+        response = self.client.search(index=self.index, **build_rank_body(es_query, k)).body
+        hits = response["hits"]["hits"]
+        return EsRanking(
+            doc_ids=[str(hit["_id"]) for hit in hits],
+            scores=[float(hit["_score"]) for hit in hits],
+            took_ms=int(response["took"]),
+        )
 
     def search_body(
         self,

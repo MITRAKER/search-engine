@@ -16,6 +16,7 @@ from searchengine.es_engine import (
     MAX_ANALYZE_LENGTH,
     MAX_AUTOCOMPLETE,
     ElasticsearchEngine,
+    EsRanking,
     IndexingError,
     default_url,
 )
@@ -291,6 +292,36 @@ def test_search_reads_hits_facets_and_totals():
     assert request["index"] == "test"
     assert request["query"]["combined_fields"]["fields"] == ["title^3.0", "body^1.0"]
     assert request["post_filter"] == {"term": {"category": "ranking"}}
+
+
+def test_rank_returns_only_ids_scores_and_elasticsearchs_own_time():
+    engine, fake = make_engine()
+    hits: list[dict[str, object]] = [{"_id": "7", "_score": 2.5}, {"_id": 12, "_score": 1.25}]
+    fake.search_responses = [search_response(hits)]
+    assert engine.rank("fuzzy", k=2) == EsRanking(["7", "12"], [2.5, 1.25], took_ms=3)
+    [request] = fake.called("search")
+    assert (request["index"], request["size"], request["source"]) == ("test", 2, False)
+    assert request["sort"] == [{"_score": "desc"}, {"id": "asc"}]
+    assert "combined_fields" in request["query"]  # BM25F, like search()
+    assert "highlight" not in request
+    assert "aggs" not in request
+
+
+def test_rank_can_score_each_field_on_its_own():
+    engine, fake = make_engine()
+    fake.search_responses = [search_response()]
+    engine.rank("fuzzy", field_weights={"body": 2.0}, query_type="best_fields")
+    query = fake.called("search")[0]["query"]["multi_match"]
+    assert (query["type"], query["fields"]) == ("best_fields", ["body^2.0"])
+
+
+def test_rank_checks_its_arguments_like_search():
+    engine, fake = make_engine()
+    with pytest.raises(ValueError, match="k1 and b are settings of the Elasticsearch index"):
+        engine.rank("x", options=SearchOptions(k1=2.0))
+    with pytest.raises(ValueError, match="k must be"):
+        engine.rank("x", k=0)
+    assert fake.calls == []
 
 
 def test_search_only_searches_weighted_fields():
