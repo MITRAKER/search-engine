@@ -20,6 +20,7 @@ import pytest
 from elasticsearch import Elasticsearch
 
 from searchengine import Hit, InvertedIndex, SearchOptions, analyze_tokens
+from searchengine.benchmark import ES_SYSTEMS, SCRATCH_SYSTEMS, load_collection, run_benchmark
 from searchengine.datasets import load_jsonl
 from searchengine.es_engine import ElasticsearchEngine, EsHit, IndexingError, default_url
 
@@ -337,3 +338,22 @@ def test_best_fields_scores_each_field_on_its_own(engines):
     best = es.rank("inverted index", k=5, query_type="best_fields")
     assert best.doc_ids
     assert best.scores != combined.scores  # not BM25F: another formula
+
+
+def test_the_benchmark_gives_both_engines_the_same_quality(client):
+    systems = (SCRATCH_SYSTEMS[0], ES_SYSTEMS[0])  # BM25F with the title weighted 3, twice
+    es = ElasticsearchEngine(client, index=f"test-bench-{os.getpid()}")
+    report = run_benchmark(load_collection(None), systems, es=es, trials=100)
+    scratch_result, es_result = report.results
+    assert es_result.evaluation == scratch_result.evaluation  # query by query
+    assert es_result.p_value == 1.0  # no difference at all
+    assert report.environment["elasticsearch"] == GOLDEN["elasticsearch"]
+    assert not client.indices.exists(index=es.index)  # deleted afterwards
+
+
+def test_the_benchmark_refuses_an_index_that_already_exists(engines):
+    _, es = engines
+    taken = ElasticsearchEngine(es.client, index=es.index)
+    with pytest.raises(ValueError, match="already exists"):
+        run_benchmark(load_collection(None), ES_SYSTEMS, es=taken)
+    assert es.count() == 25  # untouched
