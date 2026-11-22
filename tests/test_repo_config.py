@@ -16,11 +16,15 @@ def compose_image() -> str:
     return match.group(1)
 
 
-@pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
-def test_ci_tests_against_the_same_elasticsearch_as_local_development(workflow):
+@pytest.mark.parametrize(
+    ("workflow", "services"),
+    [("ci.yml", 2), ("release.yml", 1)],  # ci.yml: the integration tests and the benchmark
+)
+def test_ci_tests_against_the_same_elasticsearch_as_local_development(workflow, services):
     """Dependabot updates docker-compose.yml, not the workflows: keep them in step."""
     text = (ROOT / ".github" / "workflows" / workflow).read_text("utf-8")
-    assert f"image: {compose_image()}" in text
+    images = re.findall(r"^\s+image: (\S+)$", text, re.M)
+    assert images == [compose_image()] * services
 
 
 def test_the_release_runs_the_integration_tests_too():
@@ -33,3 +37,9 @@ def test_the_golden_file_was_recorded_with_that_elasticsearch():
     golden = json.loads((ROOT / "tests" / "data" / "es_parity.json").read_text("utf-8"))
     version = compose_image().split(":")[1].split("@")[0]
     assert golden["elasticsearch"] == version
+
+
+def test_the_recorded_benchmark_was_run_on_that_elasticsearch():
+    report = json.loads((ROOT / "benchmarks" / "scifact.json").read_text("utf-8"))
+    version = compose_image().split(":")[1].split("@")[0]
+    assert report["environment"]["elasticsearch"] == version

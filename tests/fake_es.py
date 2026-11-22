@@ -149,6 +149,10 @@ class FakeElasticsearch:
         self.record("count", kwargs)
         return Response({"count": 25})
 
+    def info(self, **kwargs: Any) -> Response:
+        self.record("info", kwargs)
+        return Response({"version": {"number": "9.5.5"}})
+
     def search(self, **kwargs: Any) -> Response:
         self.record("search", kwargs)
         return Response(self.search_responses.pop(0))

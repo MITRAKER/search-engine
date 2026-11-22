@@ -26,11 +26,12 @@ make check   # lint, format, types, JPL rules, tests and hygiene
 make audit   # dependencies with known vulnerabilities
 ```
 
-`make check` uses one Python version and leaves out the integration tests.
-CI also runs the tests on Python 3.11 to 3.14 and the integration tests on a
-real Elasticsearch, builds and installs the package, and runs CodeQL and
-GitHub's dependency review, so a pull request can still fail on something
-`make check` passed. To run the checks one at a time:
+`make check` uses one Python version and leaves out the integration tests
+and the benchmark. CI also runs the tests on Python 3.11 to 3.14, the
+integration tests and the SciFact benchmark on a real Elasticsearch, builds
+and installs the package, and runs CodeQL and GitHub's dependency review, so
+a pull request can still fail on something `make check` passed. To run the
+checks one at a time:
 
 | Check | Command | What it catches |
 |---|---|---|
@@ -40,6 +41,7 @@ GitHub's dependency review, so a pull request can still fail on something
 | JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, shared state, dynamic code |
 | Tests | `pytest -m "not integration" --cov --cov-fail-under=95` | broken behavior; coverage must stay at 95% or higher |
 | Integration | `make integration` | the two engines disagreeing on a real Elasticsearch (see below) |
+| Benchmark | `make scifact` | search quality on SciFact moving, in either engine (see below) |
 | Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
 
@@ -66,6 +68,16 @@ python scripts/make_parity_golden.py       # rewrites tests/data/es_parity.json
 git diff --stat tests/data                 # review what changed
 ```
 
+`tests/data/trec_eval.json` holds trec_eval's own scores for random
+rankings, so `tests/test_evaluation.py` can check our metrics against the
+program research papers use. Record it again only when the cases in
+`scripts/make_trec_eval_golden.py` change:
+
+```bash
+pip install pytrec_eval-terrier==0.5.11    # trec_eval, as a Python module
+python scripts/make_trec_eval_golden.py    # rewrites tests/data/trec_eval.json
+```
+
 ### Integration tests
 
 `tests/test_es_integration.py` runs both engines side by side on a real
@@ -79,10 +91,36 @@ make integration              # REQUIRE_ES=1 pytest -m integration
 ```
 
 To move to a new Elasticsearch version, change the image in
-`docker-compose.yml`, `.github/workflows/ci.yml` and
-`.github/workflows/release.yml` (a test checks that they match), then record
-the golden file again with `python scripts/make_parity_golden.py` (a test
-checks that it names the same version).
+`docker-compose.yml`, `.github/workflows/ci.yml` (both jobs that use it) and
+`.github/workflows/release.yml` (a test checks that they match). Then record
+the golden file again with `python scripts/make_parity_golden.py`, and the
+benchmark report as described below. Tests check that both name the new
+version.
+
+### The benchmark
+
+CI runs both engines on SciFact and compares every quality score with the
+recorded report, `benchmarks/scifact.json`. A change that moves any of them
+by more than 0.0001 fails. Speed is reported but not checked, because it
+depends on the machine.
+
+```bash
+docker compose up -d --wait   # Elasticsearch on localhost:9200, or set ES_URL
+make scifact                  # downloads SciFact into datasets/scifact the first time
+make bench                    # our engine alone, on the sample data
+```
+
+If your change is meant to move quality, a better analyzer for example,
+record the report again in the same pull request, and say in its description
+what moved and why. A new or renamed system needs a new recording too.
+
+```bash
+searchengine-bench --scifact datasets/scifact --download --engine both \
+    --json benchmarks/scifact.json --markdown benchmarks/scifact.md
+git diff benchmarks/                       # review what changed
+```
+
+Then update the results in `README.md` and in `LEARNING.md` chapter 5.
 
 ## Making a change
 

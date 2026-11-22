@@ -21,7 +21,8 @@ It even stores document lengths in one byte, the way Lucene does. A
 golden-file test checks this on every run. Its tokenizer gives
 Elasticsearch's terms down to Unicode casing, combining marks and letters
 beyond U+FFFF, and its Porter stemmer matches Elasticsearch's on all 36,007
-words tested.
+words tested. On the SciFact benchmark, both engines return the same top 100
+documents, in the same order, for all 300 claims.
 
 > 📘 **Learning as you go?** [LEARNING.md](LEARNING.md) explains every step:
 > what was built, why, the concepts and math behind it, interview questions
@@ -38,6 +39,7 @@ words tested.
 | Typos | Levenshtein distance, `AUTO` fuzziness, "did you mean" | `fuzziness: AUTO`, a term suggester for "did you mean" |
 | Product features | | facets, highlighted snippets, autocomplete |
 | Insight | `explain()` breaks every score down | the `_explain` API |
+| Evaluation | nDCG, MRR, precision, recall and MAP as trec_eval defines them, a significance test, latency percentiles | the same benchmark, through a lean ranking request |
 
 ## Quick start
 
@@ -83,6 +85,40 @@ print(engine.suggest("elastisearch rankng"))  # elasticsearch ranking
 print(engine.autocomplete("inverted ind"))  # ['Inverted index']
 ```
 
+### Benchmark
+
+```bash
+searchengine-bench                                 # quality and speed on 12 judged sample queries
+searchengine-bench --scifact datasets/scifact --download --engine both   # both engines on SciFact
+make scifact                                       # the same, failing if a quality score moved
+```
+
+## Results on SciFact
+
+[SciFact](https://github.com/allenai/scifact) is one of the
+[BEIR](https://github.com/beir-cellar/beir) benchmarks: 5,183 abstracts of
+scientific papers, and 300 claims whose cited abstracts must be found. The
+recorded run ([benchmarks/scifact.md](benchmarks/scifact.md)):
+
+| System | Engine | nDCG@10 | Recall@100 | p (nDCG vs row 1) | Median ms | p99 ms |
+|---|---|---|---|---|---|---|
+| BM25F, title x3 | from scratch | 0.6860 | 0.9276 |  | 15.31 | 42.67 |
+| BM25F, equal weights | from scratch | 0.6798 | 0.9276 | 0.1305 | 16.14 | 44.91 |
+| TF-IDF, title x3 | from scratch | 0.6524 | 0.9092 | 0.0003 | 5.91 | 16.92 |
+| combined_fields, title x3 | Elasticsearch | 0.6860 | 0.9276 | 1.0000 | 7.68 | 17.92 |
+| best_fields, tie_breaker 0.5 | Elasticsearch | 0.6904 | 0.9142 | 0.5130 | 7.01 | 14.73 |
+
+- Both engines give the same BM25F ranking: the same scores and, for every
+  claim, the same 100 documents in the same order.
+- BM25 is clearly better than TF-IDF (p = 0.0003, a paired randomization
+  test). The other differences could be luck.
+- Elasticsearch answers about twice as fast as our pure-Python engine, and
+  its slowest 1% of queries much faster. Times depend on the machine; the
+  quality scores do not, and CI fails if one of them moves.
+
+[LEARNING.md chapter 5](LEARNING.md#chapter-5-measuring-search-quality-on-scifact)
+explains every column, and how these compare with published BM25 numbers.
+
 ## Project status
 
 | Milestone | What | Status |
@@ -91,7 +127,7 @@ print(engine.autocomplete("inverted ind"))  # ['Inverted index']
 | 2 | From-scratch engine: analyzer, inverted index, BM25F, phrases, typos | ✅ |
 | 2b | Professional engineering: CI/CD, quality gates, NASA/JPL rules | ✅ |
 | 3 | Elasticsearch: analyzers, boosting, autocomplete, facets, parity tests | ✅ |
-| 4 | Evaluation on SciFact: nDCG@10, recall, latency, from scratch vs Elasticsearch | ⏳ |
+| 4 | Evaluation on SciFact: nDCG@10, recall, latency, from scratch vs Elasticsearch | ✅ |
 | 5 | Web UI and API | ⏳ |
 
 ## Engineering
@@ -110,6 +146,9 @@ Every pull request must pass:
   pinned by digest). Word queries must find the same documents with the same
   scores at any field weights; the few differences by design are
   [listed in LEARNING.md](LEARNING.md#44-where-the-two-engines-differ-on-purpose).
+- **Benchmark**: both engines on SciFact, compared with the recorded report
+  ([benchmarks/scifact.json](benchmarks/scifact.json)). Any quality score
+  that moves fails the job; our metrics are checked against trec_eval's.
 - **Security**: CodeQL, `pip-audit`, Dependabot (Python packages, Actions and
   the Elasticsearch image), dependency review, Actions pinned by SHA
 - **Packaging**: the wheel is built, installed in a clean environment and run
@@ -126,12 +165,15 @@ searchengine/
   index.py       inverted index, BM25F and TF-IDF search, phrases, explain
   scoring.py     the ranking formulas
   spelling.py    edit distance and typo correction
-  datasets.py    JSON Lines and SciFact loaders
+  datasets.py    JSON Lines, judged queries and SciFact loaders
+  evaluation.py  nDCG, MRR, precision, recall, MAP, randomization test
+  benchmark.py   searchengine-bench: quality and speed of each system
   es_dsl.py      Elasticsearch settings and queries, built as plain data
   es_engine.py   the same engine on Elasticsearch
   cli.py         command line, for both engines
-  data/          25-document sample dataset
-scripts/         JPL rule checker, golden-file recorder, release notes
+  data/          25-document sample dataset, and 12 judged queries for it
+scripts/         JPL rule checker, golden-file recorders, release notes
+benchmarks/      the recorded SciFact report, which CI compares against
 tests/           unit, property-based, golden-file and integration tests
                  (Elasticsearch as the oracle)
 docs/            coding standard

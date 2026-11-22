@@ -37,6 +37,39 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Elasticsearch service container. The release workflow runs them too.
 - Dependabot updates for the Elasticsearch image.
 - `LEARNING.md` chapter 4: the same engine on Elasticsearch.
+- Search quality and speed, measured (`searchengine-bench`, from
+  `searchengine.benchmark`):
+  - `searchengine.evaluation`: judged queries, and nDCG@k, MRR@k,
+    precision@k, recall and average precision with trec_eval's definitions.
+    A judged query a run has no answer for scores 0. The metrics are checked
+    against trec_eval's own scores for 200 random rankings
+    (`tests/data/trec_eval.json`, recorded by
+    `scripts/make_trec_eval_golden.py`).
+  - A seeded, two-sided paired randomization test of each system's nDCG
+    against the first system's.
+  - The time of every query after 20 untimed warm-up queries (mean, median,
+    p95 and p99), and Elasticsearch's own time for its systems.
+  - Five systems: our BM25F with the title counted three times or alike, our
+    TF-IDF, Elasticsearch's `combined_fields`, and the `best_fields` query
+    that the BEIR toolkit sends to Elasticsearch.
+  - Reports as Markdown and JSON, and `--check REPORT`, which fails when a
+    quality score has moved by more than 0.0001 since a recorded report.
+  - Elasticsearch systems run on a new index that is deleted afterwards, even
+    when the run fails. An existing index is refused, not replaced.
+- SciFact, the BEIR benchmark, as judged queries: `fetch_scifact` downloads
+  it and checks the archive against a pinned SHA-256 before unpacking its
+  three files, and `load_scifact_claims` reads the claims as queries and the
+  abstracts they cite as relevant documents.
+- 12 judged queries for the sample documents
+  (`searchengine/data/sample_queries.jsonl`), so the benchmark runs without a
+  download.
+- `ElasticsearchEngine.rank()`, which asks only for ids and scores, and
+  `query_type="best_fields"` for `build_query`.
+- The recorded SciFact report, `benchmarks/scifact.json` and `.md`. Both
+  engines give the same BM25F ranking on all 300 claims: nDCG@10 0.686.
+- A CI job that runs both engines on SciFact on every push and fails if any
+  quality score moves, and `make bench` and `make scifact`.
+- `LEARNING.md` chapter 5: measuring search quality on SciFact.
 
 ### Changed
 

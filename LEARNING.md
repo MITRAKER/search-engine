@@ -13,7 +13,7 @@ here is backed by a test in `tests/`, so when in doubt, read the test.
 | 2 | The engine, from scratch | ✅ |
 | 3 | Engineering like a professional team: CI/CD, quality gates, NASA/JPL rules | ✅ |
 | 4 | The same engine on Elasticsearch | ✅ |
-| 5 | Measuring search quality on SciFact | planned |
+| 5 | Measuring search quality on SciFact | ✅ |
 | 6 | Web UI and API | planned |
 
 ---
@@ -761,3 +761,365 @@ pytest -m integration                       # both engines side by side
    one edit (the "optimal string alignment" distance), as Lucene does. Then
    "rnak" gets the same suggestion from both engines: add an integration
    test that shows it.
+
+---
+
+## Chapter 5: Measuring search quality on SciFact
+
+Chapters 2 and 4 built two engines that agree with each other. Agreeing is
+not the same as being good. This chapter measures how good they are, on a
+benchmark that research papers use, and how fast they are. It also shows how
+to tell a real improvement from luck, and how CI stops the numbers from
+slipping.
+
+### What was built
+
+- `searchengine/evaluation.py`: judged queries, the five standard metrics
+  (nDCG, MRR, precision, recall, average precision), `evaluate()` for a
+  whole run, and a paired randomization test that says whether two systems
+  really differ.
+- `searchengine/datasets.py`: loaders for judged queries and for SciFact, and
+  `fetch_scifact()`, which downloads SciFact and checks it against a pinned
+  SHA-256 checksum.
+- `searchengine/benchmark.py`, the `searchengine-bench` command. It runs five
+  *systems* (an engine and a way of searching), scores and times each one,
+  and writes the report as Markdown and JSON. With `--check` it fails when a
+  quality score has moved since a recorded report.
+- `ElasticsearchEngine.rank()`: a lean request that returns only ids and
+  scores, with a `best_fields` query to compare against.
+- `searchengine/data/sample_queries.jsonl`: 12 judged queries for the sample
+  documents, so the benchmark runs without a download.
+- `benchmarks/scifact.json` and `benchmarks/scifact.md`: the recorded results.
+- A CI job that runs both engines on SciFact on every push, and fails if any
+  quality score moves.
+- `scripts/make_trec_eval_golden.py`, which records trec_eval's own scores
+  for 200 random rankings in `tests/data/trec_eval.json`. Our metrics must
+  agree with every one of them.
+
+### 5.1 How search quality is measured
+
+You cannot measure "good" without saying what the right answers are. A
+**test collection** does that, with three parts:
+
+| Part | What it is | In SciFact |
+|---|---|---|
+| Documents | what the engine searches | 5,183 abstracts of scientific papers |
+| Queries | what users ask | 300 claims, like "0-dimensional biomaterials show inductive properties." |
+| Relevance judgments ("qrels") | for each query, the documents a person judged relevant, with a grade | the abstracts each claim cites |
+
+A **run** is what an engine returns: a ranked list of document ids for every
+query. A metric compares the run with the judgments and gives a number from 0
+to 1. Scoring a fixed collection offline like this is called the **Cranfield
+paradigm**, after the experiments at Cranfield in the 1960s. TREC and BEIR
+work this way.
+
+Our own format for judged queries is JSON Lines:
+
+```json
+{"id": "q2", "query": "default ranking function in Elasticsearch", "relevant": {"2": 2, "3": 1, "5": 1}}
+```
+
+Grade 2 means highly relevant (document 2, "BM25 ranking function"), grade 1
+relevant ("TF-IDF", "Apache Lucene"). A document that is not listed counts as
+not relevant. That rule is a weakness of every test collection: a good
+document that nobody judged counts as a wrong answer.
+
+### 5.2 The metrics, by hand
+
+Our engine's top 5 for q2:
+
+| Rank | Document | Grade |
+|---|---|---|
+| 1 | 2, BM25 ranking function | 2 |
+| 2 | 4, Elasticsearch | 0 |
+| 3 | 5, Apache Lucene | 1 |
+| 4 | 14, Faceted search | 0 |
+| 5 | 13, Autocomplete | 0 |
+
+| Metric | The question it answers | q2, top 5 |
+|---|---|---|
+| **Precision@k** | how much of the top k is relevant? | 2 of 5 = 0.40 |
+| **Recall@k** | how many of the relevant documents are in the top k? | 2 of 3 = 0.67 |
+| **Reciprocal rank** | how far down is the first relevant one? 1 / its rank | 1 / 1 = 1.00 |
+| **Average precision** | the precision at each relevant document found, summed, divided by the number of relevant documents | (1/1 + 2/3) / 3 = 0.56 |
+| **nDCG@k** | are the best documents at the top? It uses the grades | 2.5 / 3.13 = 0.80 |
+
+Averaged over all the queries, reciprocal rank becomes **MRR** (mean
+reciprocal rank) and average precision **MAP** (mean average precision).
+
+**nDCG**, normalized discounted cumulative gain, is the main metric of BEIR
+and of most web search work, because it is the only one of the five that
+uses the grades. Each document's gain is its grade, and its rank r divides
+the gain by log2(r + 1), so lower ranks count less:
+
+```
+DCG@5  = 2/log2(2) + 0/log2(3) + 1/log2(4) + 0 + 0 = 2 + 0.5        = 2.5
+IDCG@5 = 2/log2(2) + 1/log2(3) + 1/log2(4)          = 2 + 0.63 + 0.5 = 3.13  (the best order)
+nDCG@5 = DCG@5 / IDCG@5                                              = 0.80
+```
+
+Dividing by the ideal DCG puts every query on the same scale, from 0 to 1,
+whether it has one relevant document or fifty.
+
+Details like these decide whether your numbers can be compared with
+published ones, so we follow **trec_eval**, the program TREC and BEIR score
+with:
+
+- The gain is the grade itself. Some papers use 2^grade - 1, which rewards
+  highly relevant documents more. With grades 0 and 1 only, as in SciFact,
+  the two agree.
+- Recall and average precision divide by *all* the query's relevant
+  documents, so a missed one counts as 0.
+- A judged query the run has no answer for scores 0 and still counts, as with
+  `trec_eval -c`. Otherwise an engine could look better by failing on the
+  hard queries.
+
+The report uses two cutoffs. **k = 10** for nDCG, MRR and precision, because
+people look at the first page. **depth = 100** for recall and MAP: whether a
+slower re-ranker, given our top 100, would have the right documents to work
+with.
+
+`test_scores_match_trec_eval` checks all five metrics against trec_eval's own
+scores for 200 random judged queries and rankings, recorded once with
+`pytrec_eval` by `scripts/make_trec_eval_golden.py`. Hypothesis tests check
+the rules every metric must follow: each score is between 0 and 1, putting
+the relevant documents first and the best grades first is a perfect score,
+and nothing after position k changes a score cut at k.
+
+### 5.3 SciFact and BEIR
+
+**SciFact** (Wadden et al., EMNLP 2020) was made for checking scientific
+claims. Annotators rewrote sentences that cite papers into claims, and each
+claim keeps the abstracts its sentence cited: those are the documents to
+find. Claims are short (12.5 words on average) and abstracts long (about 200
+words), and they often use different words for the same thing. A claim about
+"phosphatidylinositide 3-kinase" inhibitors cites three abstracts that only
+ever say "PI3K". That is the **vocabulary mismatch** problem, and an engine
+that matches words, like ours, cannot solve it: in 25 of the 339 judged
+(claim, abstract) pairs, the abstract is not in our top 100.
+
+**BEIR** (Thakur et al., NeurIPS 2021) gathers retrieval benchmarks from many
+fields, so that a model can be tested on data it was not trained on, with
+nDCG@10 as its main metric. SciFact is one of them. BEIR's SciFact test set is
+SciFact's 300 *dev* claims, because the test claims come without published
+judgments, and every one of its 339 judged pairs has grade 1. Our loader
+does the same: the title stays the title, the abstract's sentences are joined
+into the body, and each cited abstract is a relevant document with grade 1.
+
+The data is **downloaded, not copied** into this repository, because SciFact
+is shared under CC BY-NC 2.0. `fetch_scifact` checks the archive's SHA-256
+against a pinned value before it unpacks anything, so every run uses exactly
+the same data and a changed file is refused. It unpacks only the three files
+it needs, under names it chooses, so an archive cannot write outside its
+folder.
+
+### 5.4 Is the difference real?
+
+On the 300 claims, BM25F with the title counted three times scores 0.6860,
+and with equal weights 0.6798. Is the title weight better, or was it lucky on
+a few claims? Each claim's nDCG can be anywhere from 0 to 1, so a difference
+of 0.006 in the mean could be noise.
+
+A **paired randomization test** answers that. *Paired*, because both systems
+answer the same queries, so we compare them query by query. If the two
+systems were equally good, which one got a query's higher score would be luck,
+and swapping the two scores would change nothing. So:
+
+1. Take each query's difference: first system minus second.
+2. Many times (10,000 here), flip the sign of each difference at random, and
+   add them up.
+3. The **p-value** is the share of those totals that are at least as far from
+   zero as the real one.
+
+```python
+observed = abs(sum(differences))
+extreme = 0
+for _ in range(trials):
+    flipped = sum(d if random_bit() else -d for d in differences)
+    if abs(flipped) >= observed:
+        extreme += 1
+p = (extreme + 1) / (trials + 1)  # the real order counts as one of the orders
+```
+
+A small p, below 0.05 say, means random swaps rarely do as well, so the
+difference is unlikely to be luck. Smucker, Allan and Carterette (CIKM 2007)
+compared the significance tests used in information retrieval and recommend
+this one: it assumes nothing about how the scores are distributed. Our seed is
+fixed, so the same scores always give the same p.
+
+Three cautions:
+
+- **p is not the size of the effect.** With enough queries, a tiny difference
+  becomes "significant". Report the difference and p together.
+- **Many comparisons.** At 0.05, one comparison in 20 looks significant by
+  luck alone. Our report makes four comparisons with row 1, so treat a p near
+  0.05 with care. A Bonferroni correction would ask for 0.05 / 4 = 0.0125.
+- **Few queries prove little.** On the sample data's 12 queries, equal weights
+  differ from title x3 on one query only, and TF-IDF on three, by amounts that
+  almost cancel out. The test gives p = 1.0 for both. With one differing
+  query, flipping its sign cannot bring the total closer to zero, so every
+  random order is as extreme as the real one.
+
+### 5.5 Measuring speed fairly
+
+A perfect ranking that takes ten seconds is useless, so the benchmark times
+every query too, with these precautions:
+
+- **Warm up first.** The first queries pay for things the later ones do not:
+  loading code, filling caches, opening the connection to Elasticsearch, and
+  the Java virtual machine compiling the code it runs most. The first 20
+  queries run once, untimed.
+- **Report the tail, not just the average.** The mean and the median describe
+  a typical query. p95 and p99 are the times that 5% and 1% of the queries
+  exceed. Users notice the slow ones, and a page that waits for 100 servers
+  waits for the slowest. "The Tail at Scale" (Dean and Barroso, 2013) is the
+  classic read on why.
+- **Time what you compare.** `rank()` sends a lean request: no document text
+  (`"_source": false`), no snippets or facet counts, and
+  `"track_total_hits": false`, because counting every match costs time and a
+  ranking does not need the count. Our engine is timed the same way: one call
+  of `search` per query.
+- **Two clocks for Elasticsearch.** The time seen from Python includes the
+  client, the HTTP round trip and the JSON. Elasticsearch's own `took` covers
+  only the search, in whole milliseconds. The difference is the price of the
+  network and the client.
+- **Do not fail CI on speed.** Times depend on the machine and on whatever
+  else runs on it. The report shows them, but `--check` compares quality only.
+
+The percentiles come from `statistics.quantiles(times, n=100,
+method="inclusive")`, which interpolates between the measured times.
+
+### 5.6 The results
+
+| System | What it is |
+|---|---|
+| BM25F, title x3 | our engine as it ships: title words count three times |
+| BM25F, equal weights | our engine, with title and body counted alike |
+| TF-IDF, title x3 | our engine, with chapter 2's classic formula |
+| combined_fields, title x3 | Elasticsearch, with the same BM25F as row 1 |
+| best_fields, tie_breaker 0.5 | Elasticsearch, with the query the BEIR toolkit sends: each field scored on its own, then the best field's score plus half of the other's |
+
+The recorded run (`benchmarks/scifact.md`), on the 300 dev claims:
+
+| System | Engine | nDCG@10 | MRR@10 | P@10 | Recall@100 | MAP@100 | p (nDCG vs row 1) |
+|---|---|---|---|---|---|---|---|
+| BM25F, title x3 | scratch | 0.6860 | 0.6505 | 0.0900 | 0.9276 | 0.6450 |  |
+| BM25F, equal weights | scratch | 0.6798 | 0.6442 | 0.0893 | 0.9276 | 0.6393 | 0.1305 |
+| TF-IDF, title x3 | scratch | 0.6524 | 0.6138 | 0.0873 | 0.9092 | 0.6071 | 0.0003 |
+| combined_fields, title x3 | es | 0.6860 | 0.6505 | 0.0900 | 0.9276 | 0.6450 | 1.0000 |
+| best_fields, tie_breaker 0.5 | es | 0.6904 | 0.6564 | 0.0907 | 0.9142 | 0.6501 | 0.5130 |
+
+| System | Engine | Mean ms | Median ms | p95 ms | p99 ms | Inside Elasticsearch, median ms |
+|---|---|---|---|---|---|---|
+| BM25F, title x3 | scratch | 16.81 | 15.31 | 34.63 | 42.67 |  |
+| BM25F, equal weights | scratch | 17.79 | 16.14 | 38.93 | 44.91 |  |
+| TF-IDF, title x3 | scratch | 6.58 | 5.91 | 14.32 | 16.92 |  |
+| combined_fields, title x3 | es | 8.26 | 7.68 | 11.57 | 17.92 | 5.00 |
+| best_fields, tie_breaker 0.5 | es | 7.29 | 7.01 | 9.77 | 14.73 | 5.00 |
+
+What they say:
+
+- **The two engines agree on a real benchmark.** Our BM25F and Elasticsearch's
+  `combined_fields` get the same quality to every digit shown, and p = 1.0
+  because no claim's score differs. Compared directly, the two runs are
+  identical: for all 300 claims, both engines return the same 100 documents
+  in the same order. Chapter 4 showed this on 25 documents; this is 5,183.
+- **The title weight does not clearly help.** Equal weights score 0.006 less,
+  with p = 0.13: we cannot tell that from luck.
+- **BM25 beats TF-IDF.** TF-IDF scores 0.034 less, with p = 0.0003. Abstracts
+  are long, and this is what BM25's saturation and length normalization
+  (section 2.4) are for.
+- **`best_fields` is level with BM25F.** Its nDCG@10 is 0.004 higher, with
+  p = 0.51, and its recall@100 is lower: 0.914 against 0.928.
+- **Published numbers need their settings.** The BEIR paper reports an
+  nDCG@10 of 0.665 for BM25 on SciFact. That comes from Anserini, a toolkit
+  built on Lucene, with k1 = 0.9 and b = 0.4, and the title and text as
+  separate fields. The BEIR toolkit's own Elasticsearch search sends the
+  `best_fields` query above, with Elasticsearch's built-in `english`
+  analyzer. Our systems use k1 = 1.2 and b = 0.75, Elasticsearch's defaults,
+  and chapter 2's analyzer. "BM25" is a family, not one number: the analyzer,
+  k1 and b, and the way fields are combined all move the score. That is why a
+  paper must state them, and why we compare our systems on the same data, in
+  the same run.
+- **Speed.** Elasticsearch answers in 7.7 ms at the median, and our engine in
+  15.3 ms. At p99 it is 18 ms against 43 ms. About 5 ms of Elasticsearch's
+  time is the search itself; the rest is the client and the round trip.
+  TF-IDF is our fastest system because it ignores document length, while
+  BM25F works out, for every query word, the length of every matching
+  document, rounded the way Lucene stores it. Loading the 5,183 documents
+  took 4.8 s into our index, and 3.3 s into Elasticsearch.
+
+These times come from one run on one machine. Run the benchmark yourself and
+yours will differ; the quality scores will not.
+
+### 5.7 Keeping the numbers honest
+
+A benchmark run once is a claim. A benchmark that CI runs on every push keeps
+the claim true.
+
+- `benchmarks/scifact.json` holds the recorded report. The `benchmark` job in
+  CI downloads SciFact (its checksum pinned), runs both engines, and
+  `--check benchmarks/scifact.json` fails if any quality score has moved by
+  more than 0.0001, or if a system is not in the recording. The tables appear
+  on the job's summary page, and the JSON is kept for 30 days.
+- A change that is *meant* to move quality, a better analyzer for example,
+  records the report again in the same pull request (CONTRIBUTING.md says
+  how). The diff of `benchmarks/scifact.json` then shows the reviewer exactly
+  what moved.
+- The benchmark makes its own Elasticsearch index and deletes it afterwards,
+  even when the run fails. It refuses an index that already exists, because
+  that may hold someone's data.
+
+### Try it
+
+```bash
+searchengine-bench                           # our engine, the sample data's 12 judged queries
+docker compose up -d --wait                  # Elasticsearch, for the rest
+searchengine-bench --engine both             # both engines on the sample data
+searchengine-bench --scifact datasets/scifact --download --engine both   # SciFact, under a minute
+make scifact                                 # the same, checked against benchmarks/scifact.json
+searchengine-bench --scifact datasets/scifact --split train --queries 100
+```
+
+### Interview questions you can now answer
+
+- *How do you measure search quality offline?* With a test collection
+  (documents, queries and graded judgments), a run for each system, and
+  metrics such as nDCG@10.
+- *nDCG, MAP or MRR?* MRR when one good answer is enough, like a question
+  with one right page. MAP when every relevant document matters and the
+  judgments are yes or no. nDCG when the judgments are graded and the top
+  positions matter most.
+- *Why normalize DCG?* So that every query counts on the same scale, and the
+  queries with many relevant documents do not dominate the mean.
+- *Your change raised nDCG@10 from 0.686 to 0.690. Ship it?* Not on that
+  alone. Test it with a paired test over the queries (here p = 0.51: it could
+  be luck), look at the other metrics (recall@100 fell), and then test it
+  online, with real users.
+- *Why report p99 latency?* The mean hides the slow tail that users notice,
+  and a request that fans out to many servers waits for the slowest one.
+- *What are the limits of offline evaluation?* The judgments are incomplete
+  (a good document nobody judged counts as wrong), the queries may not look
+  like real traffic, and it says nothing about how users behave. Online A/B
+  tests and click metrics measure that.
+- *How do you stop quality from slipping?* Record the benchmark, fail CI when
+  a score moves, and record it again on purpose, in review.
+
+### Exercises
+
+1. Add systems with the title weight at 2 and at 5. Which is best on the dev
+   claims? Then run them on the train claims (`--split train`). Does the
+   winner hold? Tuning on the data you report on is overfitting.
+2. Try BEIR's k1 = 0.9 and b = 0.4 in our engine (`SearchOptions(k1=0.9,
+   b=0.4)`). Does nDCG@10 move towards 0.665? Is the change significant?
+3. Index SciFact in Elasticsearch with its built-in `english` analyzer, and
+   run the `best_fields` query on it. How much does the analyzer alone change
+   nDCG@10?
+4. Write a paired t-test and compare its p-values with the randomization
+   test's. When do they disagree?
+5. Add a 95% bootstrap confidence interval for each system's nDCG@10:
+   resample the 300 claims with replacement 10,000 times.
+6. Score nDCG with the gain 2^grade - 1, and find the sample queries whose
+   score changes. Why does no SciFact score change?
+7. Write a test that both engines return the same top 100 for every SciFact
+   claim, and run it in the CI job.
