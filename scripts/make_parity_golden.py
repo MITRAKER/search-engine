@@ -1,6 +1,6 @@
 """Record Elasticsearch's own scores in a golden file, for tests/test_es_parity.py.
 
-    docker compose up -d                     # Elasticsearch on localhost:9200
+    docker compose up -d --wait              # Elasticsearch on localhost:9200
     python scripts/make_parity_golden.py     # writes tests/data/es_parity.json
 
 It builds a small corpus with short, long and empty fields, indexes it in

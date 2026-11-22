@@ -291,7 +291,9 @@ query --parse--> terms --postings--> candidate docs --BM25F--> scores --heap--> 
 We score **term at a time**: for each query term, walk its posting list and
 add its contribution to a running total per document. Then
 `heapq.nsmallest(k, ...)` picks the best k in O(n log k) without sorting
-everything. Ties are broken by document id, so results are reproducible.
+everything. Scores are rounded to 32-bit floats first, as Lucene's are
+(section 4.3 says why), and ties are broken by document id, so results are
+reproducible.
 
 ### Try it
 
@@ -582,7 +584,11 @@ statistics from all shards first, at the cost of an extra round trip.)
 index, updating its settings and opening it again (no reindexing is needed,
 since BM25 only uses them at search time). So the engine treats them as part
 of the index: it refuses a search that asks for other values, and refuses to
-reuse an index that was made with other ones.
+reuse an index that has other ones. More generally, it stores a fingerprint
+(a SHA-256 hash) of its settings and mappings in the index, in the mapping's
+`_meta`, and reuses an index only if it finds its own fingerprint there. An
+index made by hand, or with another analyzer, other fields or another
+version of this code, is refused, and so is one with more than one shard.
 
 **`combined_fields` for BM25F.** There are two families of multi-field
 queries, and the difference is a classic interview topic:
@@ -602,14 +608,20 @@ require every weight to be at least 1.
 
 ### 4.3 What a real product adds
 
-- **Bulk loading.** `index_documents` sends up to 500 documents, or about
-  10 MB, per bulk request: Elasticsearch refuses a request over 100 MB. It
-  uses the `create` action, so a duplicate id is an error instead of a silent
-  overwrite. The index must exist first; otherwise Elasticsearch would create
-  one by itself, with its default analyzer. Unlike `InvertedIndex.add`, a
-  bulk load is not atomic: documents sent before a failure stay in the index
-  (as they do with `InvertedIndex.add_many`), so the command line deletes a
-  half-built index, on an error or on Ctrl-C.
+- **Bulk loading.** `index_documents` starts a new bulk request every 500
+  documents, or sooner, once a request holds 10 MB of documents. With at most
+  one more document (of up to 10 MB), a request stays far below the 100 MB
+  that Elasticsearch accepts. It uses the `create` action, so a duplicate id
+  is an error instead of a silent overwrite. The index must exist first;
+  otherwise Elasticsearch would create one by itself, with its default
+  analyzer. A bulk load is not atomic: when one fails, Elasticsearch keeps the
+  requests sent before, and every good document of the failing request, even
+  those after the bad one (4.4 compares this with `InvertedIndex.add_many`).
+  So the engine marks the index unfinished in its `_meta` while a load runs,
+  and does not reuse it until a load has finished, even after a crash. The
+  command line also deletes a half-built index, on an error or on Ctrl-C, and
+  with `--reindex` it checks every document of the file (`check_documents`)
+  before it deletes the old index.
 - **Facets.** A `terms` aggregation counts the matches per category. The
   category filter goes in `post_filter`, which runs *after* the counting, so
   the counts still show every category and the user can switch with one click.
@@ -618,8 +630,9 @@ require every weight to be at least 1.
   `<mark>`. With `"encoder": "html"` it escapes the document text first, so a
   document containing `<script>` cannot inject code into a results page. It
   refuses to highlight past the first million characters of a field and fails
-  the whole search, unless the request sets `max_analyzed_offset`: then it
-  only highlights the start of a longer field.
+  the whole search, unless the request sets `max_analyzed_offset` to at most
+  that limit (we send 999,999): then it only highlights the start of a longer
+  field.
 - **Autocomplete.** The title also has a `search_as_you_type` sub-field, which
   indexes word prefixes and two- and three-word shingles. A `bool_prefix`
   query matches every typed word exactly, except the last one, which may be
@@ -639,7 +652,13 @@ require every weight to be at least 1.
 - **Ties.** Lucene returns equal scores in index order, our engine by
   document id. The id is also indexed as a `keyword`, and the search sorts by
   score and then by id, so both engines keep the same documents when `k`
-  cuts through a tie.
+  cuts through a tie. That needs equal scores to *be* equal: Lucene's scores
+  are 32-bit floats, while our engine adds up 64-bit ones, whose last bits
+  depend on the order of the additions. Two scores that are equal in exact
+  arithmetic could differ there and not tie. So our engine rounds its scores
+  to 32-bit floats, like Lucene's, before it ranks them. (Rounded from slightly
+  different sums, two scores could in rare cases still land on neighbouring
+  32-bit floats.)
 
 ### 4.4 Where the two engines differ, on purpose
 
@@ -647,9 +666,12 @@ require every weight to be at least 1.
 |---|---|---|
 | Typos (`fuzzy`) | corrects each word to the one closest known word, then searches | expands each word to the indexed terms within the allowed edits and scores them all |
 | Phrase on several fields, or with a weight other than 1 | BM25F with the phrase count | the best field's score, multiplied by its weight |
-| TF-IDF | yes | no: Elasticsearch 9 has no TF-IDF similarity |
+| TF-IDF | yes | no: Elasticsearch 9 has no built-in TF-IDF similarity (a `scripted` similarity could compute one) |
 | Typos of two swapped letters ("rnak") | two edits | one edit (a transposition), so short words get more fixes |
 | Fuzzy phrases | yes | not offered: phrase queries have no fuzziness, and intervals or span queries, which do, score differently |
+| "Did you mean" with a wrong first letter and one more typo ("xlastisearch") | corrects it | no suggestion: Lucene's spell checker keeps the first letter when it looks two edits away |
+| "Did you mean" between two equally close words | the one that occurs more often | the one in more documents |
+| A failed load | `add_many` keeps the documents before the bad one, and none after it | the failing bulk request still indexes its good documents, even after the bad one; a document our own check refuses stops the load before its request is sent. The index is marked unfinished and not reused |
 
 Everything else gives the same results with the same scores, to about 7
 significant digits: words in OR and AND mode, any field weights, and phrases
@@ -707,8 +729,9 @@ pytest -m integration                       # both engines side by side
 - *`multi_match` or `combined_fields`?* `multi_match` with `best_fields` or
   `most_fields` is field-centric: each field scores on its own.
   `combined_fields` is term-centric and treats several fields as one (BM25F).
-  `multi_match` with `cross_fields` is term-centric too, but blends per-field
-  scores instead.
+  `multi_match` with `cross_fields` is term-centric too: it blends each
+  word's statistics across the fields, but still scores each field on its own
+  and keeps the best field's score for each word.
 - *`text` versus `keyword`?* `text` is analyzed into terms for full-text
   search; `keyword` is one exact value, for filters, sorting and aggregations.
 - *Query, filter or `post_filter`?* A query scores; a filter only includes or

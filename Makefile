@@ -23,7 +23,7 @@ jpl:  ## check the NASA/JPL Power of Ten rules
 test:  ## run the tests with coverage (not the integration tests)
 	pytest -m "not integration" --cov --cov-fail-under=95
 
-integration:  ## both engines on a live Elasticsearch (first: docker compose up -d)
+integration:  ## both engines on a live Elasticsearch (first: docker compose up -d --wait)
 	REQUIRE_ES=1 pytest -m integration
 
 audit:  ## look for dependencies with known vulnerabilities

@@ -38,7 +38,7 @@ GitHub's dependency review, so a pull request can still fail on something
 | Format | `ruff format .` | inconsistent style (it fixes it for you) |
 | Types | `mypy` | type errors, unhandled `None`, wrong arguments |
 | JPL rules | `python scripts/check_jpl.py searchengine scripts tests` | recursion, unbounded loops, long functions, shared state, dynamic code |
-| Tests | `pytest -m "not integration" --cov` | broken behavior; coverage must stay at 95% or higher |
+| Tests | `pytest -m "not integration" --cov --cov-fail-under=95` | broken behavior; coverage must stay at 95% or higher |
 | Integration | `make integration` | the two engines disagreeing on a real Elasticsearch (see below) |
 | Hygiene | `make hygiene` | trailing whitespace, broken YAML or JSON, conflict markers, large files, private keys |
 | Audit | `make audit` | dependencies with known vulnerabilities |
@@ -81,7 +81,8 @@ make integration              # REQUIRE_ES=1 pytest -m integration
 To move to a new Elasticsearch version, change the image in
 `docker-compose.yml`, `.github/workflows/ci.yml` and
 `.github/workflows/release.yml` (a test checks that they match), then record
-the golden file again.
+the golden file again with `python scripts/make_parity_golden.py` (a test
+checks that it names the same version).
 
 ## Making a change
 

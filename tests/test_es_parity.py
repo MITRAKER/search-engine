@@ -53,7 +53,8 @@ def our_scores(
 
 
 def test_golden_file_covers_long_fields_and_every_kind_of_query():
-    assert GOLDEN["elasticsearch"] == "9.5.5"
+    # Which Elasticsearch recorded it: test_repo_config.py checks it against
+    # docker-compose.yml, so a new version is changed in one place.
     longest = max(len(doc["body"].split()) for doc in GOLDEN["corpus"])
     assert longest > 1000  # far beyond the 40 terms Lucene stores exactly
     assert {case["mode"] for case in CASES} == {"or", "and"}
