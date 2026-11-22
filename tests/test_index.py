@@ -16,7 +16,7 @@ from searchengine.index import (
     check_field_names,
     split_phrase,
 )
-from searchengine.scoring import MAX_FIELD_WEIGHT, MIN_FIELD_WEIGHT
+from searchengine.scoring import MAX_FIELD_WEIGHT, MIN_FIELD_WEIGHT, float32
 from tests.helpers import make_index
 
 # ---------- indexing ----------
@@ -575,3 +575,14 @@ def test_empty_documents_do_not_count_towards_statistics():
     with_empty = make_index("cat dog", "", "dog")
     without = make_index("cat dog", "dog")
     assert with_empty.search("cat")[0].score == pytest.approx(without.search("cat")[0].score)
+
+
+def test_scores_equal_in_exact_arithmetic_tie_like_lucenes_32_bit_scores():
+    # In 64-bit floats the two sums differ in the last bit (0.88155478010263770
+    # against 0.88155478010263750), so without rounding "2" would come first.
+    index = InvertedIndex(fields=("body",))
+    index.add({"id": "1", "body": "x x x y y y z z z z"})
+    index.add({"id": "2", "body": "x x x y y y y z z z"})
+    first, second = index.search("x y z", k=2)
+    assert (first.doc_id, second.doc_id) == ("1", "2")  # a tie, broken by id
+    assert first.score == second.score == float32(first.score)

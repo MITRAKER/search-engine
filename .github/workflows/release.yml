@@ -26,6 +26,25 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    services:
+      elasticsearch:
+        # The same image as docker-compose.yml and CI (tests/test_repo_config.py checks).
+        image: elasticsearch:9.5.5@sha256:b7b0f24e9b5e90656ffe69804b3a48907499ab2b9cd67f02b7af3aff1b026a89
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+          cluster.routing.allocation.disk.threshold_enabled: "false"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow"
+          --health-interval 10s
+          --health-timeout 40s
+          --health-retries 30
+    env:
+      ES_URL: http://localhost:9200
+      REQUIRE_ES: "1" # the integration tests run too, and cannot be skipped
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +60,7 @@ jobs:
         run: python -m pip install -c requirements-dev.txt -e ".[dev]" build
       - name: Check the tag matches the package version
         run: python scripts/release_notes.py --check-version "$GITHUB_REF_NAME"
-      - name: Run the full test suite one more time
+      - name: Run the full test suite one more time, on Elasticsearch too
         run: pytest -q
       - name: Build sdist and wheel
         run: python -m build

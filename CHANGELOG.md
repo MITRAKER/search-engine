@@ -7,6 +7,49 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The same engine on Elasticsearch, in `searchengine.es_engine`
+  (`pip install -e ".[es]"`):
+  - A custom analyzer with the same steps as ours, one shard and the same
+    BM25 parameters, so word queries (OR and AND, any field weights, through
+    `combined_fields`) get the same scores as the from-scratch engine, and
+    equal scores are sorted by document id in both.
+  - Bulk loading with `create` actions, so a duplicate id is an error rather
+    than an overwrite, in requests of at most 500 documents, cut short once
+    they hold 10 MB. An existing index is reused only if this engine made it
+    with the same settings and fields (a fingerprint stored in the index says
+    so), it still has one shard and the same k1 and b, and its last load
+    finished. It may be an alias of one index.
+  - Facet counts per category with a `post_filter`, HTML-escaped highlighted
+    snippets (also for fields over a million characters), title autocomplete
+    (`search_as_you_type`, every typed word must match), "did you mean" (a
+    term suggester that leaves words matching a document alone), fuzzy
+    search, and Elasticsearch's `_explain`.
+  - Every request is built as plain data by `searchengine.es_dsl`, so it can
+    be tested without a server.
+- `searchengine --engine es`, with `--index`, `--reindex` and `--category`.
+  It checks the query, and with `--reindex` every document of the data file,
+  before it touches the index, and it deletes a half-built index on an error
+  or on Ctrl-C. Errors, timeouts included, are one-line messages.
+- Integration tests that run both engines side by side on a real
+  Elasticsearch (`make integration`), and a CI job that runs them against an
+  Elasticsearch service container. The release workflow runs them too.
+- Dependabot updates for the Elasticsearch image.
+- `LEARNING.md` chapter 4: the same engine on Elasticsearch.
+
+### Changed
+
+- Scores are rounded to 32-bit floats, as Lucene's are, before they are
+  ranked. Two scores that are equal in exact arithmetic now always tie, and
+  are sorted by document id, as in Elasticsearch; before, the last bits of a
+  64-bit sum could put either first.
+- `docker-compose.yml` pins Elasticsearch by digest. CI uses the same image,
+  and a test fails if the two differ.
+- `scripts/make_parity_golden.py` builds its index and queries with
+  `searchengine.es_dsl`, the code the engine uses. The recorded scores did
+  not change.
+
 ## [0.1.0] - 2026-11-17
 
 ### Added

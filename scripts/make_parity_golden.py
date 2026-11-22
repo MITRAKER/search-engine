@@ -1,11 +1,12 @@
 """Record Elasticsearch's own scores in a golden file, for tests/test_es_parity.py.
 
-    docker compose up -d                     # Elasticsearch on localhost:9200
+    docker compose up -d --wait              # Elasticsearch on localhost:9200
     python scripts/make_parity_golden.py     # writes tests/data/es_parity.json
 
 It builds a small corpus with short, long and empty fields, indexes it in
-Elasticsearch with the same analyzer as ``searchengine/analyzer.py``, runs a
-set of queries and saves the corpus, the queries and Elasticsearch's scores.
+Elasticsearch with the settings, mappings and queries of the Elasticsearch
+engine (``searchengine/es_dsl.py``), runs a set of queries and saves the
+corpus, the queries and Elasticsearch's scores.
 It also saves the terms Elasticsearch's copy of the analyzer makes from some
 tricky text. The test then checks our engine against all of it, without
 needing Elasticsearch. Besides the standard library it only needs this
@@ -24,7 +25,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
 
-from searchengine.analyzer import ENGLISH_STOPWORDS, MAX_TOKEN_LENGTH
+from searchengine.es_dsl import ANALYZER, build_query, index_mappings, index_settings
+from searchengine.index import SearchOptions
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 OUTPUT: Final = ROOT / "tests" / "data" / "es_parity.json"
@@ -118,42 +120,22 @@ def make_cases() -> list[dict[str, Any]]:
 
 
 def es_query(case: dict[str, Any]) -> dict[str, Any]:
-    text: str = case["query"]
-    fields = [f"{name}^{weight}" for name, weight in case["weights"].items()]
-    if text.startswith('"'):
-        (field,) = case["weights"]
-        return {"match_phrase": {field: text.strip('"')}}
-    return {"combined_fields": {"query": text, "fields": fields, "operator": case["mode"]}}
+    """The query the Elasticsearch engine sends for this case."""
+    return build_query(case["query"], SearchOptions(mode=case["mode"]), case["weights"])
 
 
 def analyzer_cases(url: str) -> list[list[Any]]:
     """Each tricky text with the terms and positions Elasticsearch makes of it."""
     cases: list[list[Any]] = []
     for text in ANALYZER_TEXTS:
-        body = {"analyzer": "scratch", "text": text}
+        body = {"analyzer": ANALYZER, "text": text}
         tokens = request(f"{url}/{INDEX}/_analyze", "POST", body)["tokens"]
         cases.append([text, [[token["token"], token["position"]] for token in tokens]])
     return cases
 
 
 def create_index(url: str, corpus: list[dict[str, str]]) -> None:
-    analysis = {
-        "tokenizer": {"words": {"type": "pattern", "pattern": "[^\\p{L}\\p{M}\\p{N}]+"}},
-        "filter": {
-            "max_length": {"type": "length", "max": MAX_TOKEN_LENGTH},
-            "english_stop": {"type": "stop", "stopwords": sorted(ENGLISH_STOPWORDS)},
-        },
-        "analyzer": {
-            "scratch": {
-                "type": "custom",
-                "tokenizer": "words",
-                "filter": ["lowercase", "max_length", "english_stop", "porter_stem"],
-            }
-        },
-    }
-    text = {"type": "text", "analyzer": "scratch"}
-    settings = {"number_of_shards": 1, "number_of_replicas": 0, "analysis": analysis}
-    mappings = {"properties": {"title": text, "body": text}}
+    settings, mappings = index_settings(), index_mappings(("title", "body"))
     request(f"{url}/{INDEX}?ignore_unavailable=true", "DELETE")
     request(f"{url}/{INDEX}", "PUT", {"settings": settings, "mappings": mappings})
     lines = []

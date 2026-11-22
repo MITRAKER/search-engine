@@ -12,7 +12,7 @@ here is backed by a test in `tests/`, so when in doubt, read the test.
 | 1 | Project setup | ✅ |
 | 2 | The engine, from scratch | ✅ |
 | 3 | Engineering like a professional team: CI/CD, quality gates, NASA/JPL rules | ✅ |
-| 4 | Elasticsearch | coming next |
+| 4 | The same engine on Elasticsearch | ✅ |
 | 5 | Measuring search quality on SciFact | planned |
 | 6 | Web UI and API | planned |
 
@@ -291,7 +291,9 @@ query --parse--> terms --postings--> candidate docs --BM25F--> scores --heap--> 
 We score **term at a time**: for each query term, walk its posting list and
 add its contribution to a running total per document. Then
 `heapq.nsmallest(k, ...)` picks the best k in O(n log k) without sorting
-everything. Ties are broken by document id, so results are reproducible.
+everything. Scores are rounded to 32-bit floats first, as Lucene's are
+(section 4.3 says why), and ties are broken by document id, so results are
+reproducible.
 
 ### Try it
 
@@ -355,7 +357,8 @@ most of them on your machine (lint, format, types, the coding standard, the
 tests and the hygiene hooks, on one Python version), and `make audit` runs
 the dependency audit. The other Python versions, the packaging test, CodeQL
 and GitHub's dependency review run only in CI, and Dependabot checks for new
-versions once a week.
+versions once a week. The integration tests of chapter 4 run in CI too, and on
+your machine with `make integration` while Elasticsearch is running.
 
 | Gate | Tool | Example of what it catches |
 |---|---|---|
@@ -507,3 +510,254 @@ CODEOWNERS asks the maintainer to review every change.
    fix it, and watch it pass.
 4. Read one Dependabot pull request when it arrives. What changed, and how do
    you know it is safe to merge?
+
+---
+
+## Chapter 4: The same engine on Elasticsearch
+
+Chapter 2 built a search engine by hand. This chapter builds the same engine
+on Elasticsearch, the search server most companies use, and makes the two
+agree: same documents, same terms, same scores. Then chapter 5 can compare
+them fairly on a real benchmark.
+
+### What was built
+
+- `searchengine/es_dsl.py`: every request we send, as plain Python dicts:
+  the index settings, the field mappings and the queries. Elasticsearch
+  speaks JSON over HTTP, and these functions only build that JSON.
+- `searchengine/es_engine.py`: `ElasticsearchEngine`, which sends those
+  requests with the official `elasticsearch` client. Its `search` takes the
+  same arguments as `InvertedIndex.search`, and adds a category filter with
+  facet counts and highlighted snippets. It also has `explain`, "did you
+  mean" (`suggest`), `autocomplete` and `analyze`.
+- `searchengine --engine es ...` on the command line.
+- Tests in three layers (see 4.5), including a CI job that starts a real
+  Elasticsearch and runs both engines side by side.
+
+The `elasticsearch` package is optional: `pip install -e ".[es]"`. The
+from-scratch engine still needs nothing outside the standard library.
+
+### 4.1 Elasticsearch in five minutes
+
+| Term | Meaning | In our project |
+|---|---|---|
+| **Index** | a collection of documents, like a database table | `searchengine` |
+| **Mapping** | the type of each field: how it is stored and searched | `index_mappings()` |
+| **`text` field** | analyzed into terms, for full-text search | title, body |
+| **`keyword` field** | stored as one exact value, for filters and counts | category |
+| **Analyzer** | tokenizer plus token filters: text to terms | `analysis_settings()` |
+| **Shard** | the index is split into shards, each a Lucene index | one shard |
+| **Segment** | an immutable piece of a shard; new documents go into new segments | |
+| **Refresh** | makes new segments searchable, every second by default | after each bulk load |
+| **Query DSL** | queries written as JSON | `build_query()` |
+
+Inside every shard is **Lucene**, a Java library with the same core you built
+in chapter 2: an inverted index with positions, BM25 and an analyzer chain.
+
+### 4.2 Making Elasticsearch behave like our engine
+
+**The same analyzer, step by step.** Elasticsearch's built-in analyzers would
+give different terms. Its `standard` tokenizer follows Unicode's word-break
+rules, so "3.14", "it's" and "snake_case" stay single tokens, while ours
+splits them; its `english` analyzer also removes a trailing "'s". So we build
+a **custom analyzer** from the same steps, in the same order:
+
+```
+pattern tokenizer [^\p{L}\p{M}\p{N}]+   split on anything but letters, marks, digits
+lowercase                               Java's per-character lowercase
+length (max 255)                        drop overlong tokens
+stop (Lucene's 33 English stopwords)    positions keep their gaps
+porter_stem                             the same Porter algorithm
+```
+
+`tests/test_es_parity.py` checks the terms for 19 tricky texts, and the
+integration tests ask the live server too.
+
+**One shard.** Lucene computes N, df and avgdl *per shard*. With five shards,
+the same document could score differently depending on where it landed.
+One shard gives the same statistics as our single index. (A big index needs
+several shards; then the `dfs_query_then_fetch` search type gathers the
+statistics from all shards first, at the cost of an extra round trip.)
+
+**The same BM25.** The index's default similarity is BM25 with our `k1` and
+`b`. They are *static* index settings: changing them means closing the
+index, updating its settings and opening it again (no reindexing is needed,
+since BM25 only uses them at search time). So the engine treats them as part
+of the index: it refuses a search that asks for other values, and refuses to
+reuse an index that has other ones. More generally, it stores a fingerprint
+(a SHA-256 hash) of its settings and mappings in the index, in the mapping's
+`_meta`, and reuses an index only if it finds its own fingerprint there. An
+index made by hand, or with another analyzer, other fields or another
+version of this code, is refused, and so is one with more than one shard.
+
+**`combined_fields` for BM25F.** There are two families of multi-field
+queries, and the difference is a classic interview topic:
+
+- *Field-centric*, like `multi_match` with `best_fields`: score each field
+  on its own, then keep the best (or add them up, with `most_fields`). Its
+  `"operator": "and"` means "all words in the **same** field".
+- *Term-centric*, like `combined_fields`: treat the fields as one big field,
+  which is exactly BM25F. "and" means "all words, in any field".
+  `multi_match` with `cross_fields` is term-centric too, but it still scores
+  each field on its own, with blended statistics, instead of computing BM25F.
+
+Our engine is term-centric, so the words go to `combined_fields`, with the
+weights written as `title^3.0`. It runs Lucene's `CombinedFieldQuery`, whose
+statistics and length rounding chapter 2.4 copied. Like it, both engines
+require every weight to be at least 1.
+
+### 4.3 What a real product adds
+
+- **Bulk loading.** `index_documents` starts a new bulk request every 500
+  documents, or sooner, once a request holds 10 MB of documents. With at most
+  one more document (of up to 10 MB), a request stays far below the 100 MB
+  that Elasticsearch accepts. It uses the `create` action, so a duplicate id
+  is an error instead of a silent overwrite. The index must exist first;
+  otherwise Elasticsearch would create one by itself, with its default
+  analyzer. A bulk load is not atomic: when one fails, Elasticsearch keeps the
+  requests sent before, and every good document of the failing request, even
+  those after the bad one (4.4 compares this with `InvertedIndex.add_many`).
+  So the engine marks the index unfinished in its `_meta` while a load runs,
+  and does not reuse it until a load has finished, even after a crash. The
+  command line also deletes a half-built index, on an error or on Ctrl-C, and
+  with `--reindex` it checks every document of the file (`check_documents`)
+  before it deletes the old index.
+- **Facets.** A `terms` aggregation counts the matches per category. The
+  category filter goes in `post_filter`, which runs *after* the counting, so
+  the counts still show every category and the user can switch with one click.
+  A filter inside the query would also shrink the counts.
+- **Highlighting.** Elasticsearch returns snippets with the matches wrapped in
+  `<mark>`. With `"encoder": "html"` it escapes the document text first, so a
+  document containing `<script>` cannot inject code into a results page. It
+  refuses to highlight past the first million characters of a field and fails
+  the whole search, unless the request sets `max_analyzed_offset` to at most
+  that limit (we send 999,999): then it only highlights the start of a longer
+  field.
+- **Autocomplete.** The title also has a `search_as_you_type` sub-field, which
+  indexes word prefixes and two- and three-word shingles. A `bool_prefix`
+  query matches every typed word exactly, except the last one, which may be
+  a prefix: "inverted ind" finds "Inverted index". Its operator is "and", so
+  every word must match; by default one of them would be enough.
+- **"Did you mean".** A **term suggester** per word on a `spelling` field
+  that holds every field's words, unstemmed. It allows the same number of
+  typos as our `SpellingIndex` (fuzziness `AUTO`). Because that field is not
+  stemmed, the same request also counts the documents each word matches in
+  the searched fields: a word that matches is known and stays as it is, as in
+  our engine ("analyzer" is fine when the index has "analyzers").
+- **Unknown fields.** The mapping is `"dynamic": "false"`: a field we did not
+  map (like `url`) is stored and returned, but not indexed. Otherwise every
+  new field name in the data would add a mapping, until the index reaches
+  `index.mapping.total_fields.limit` (1,000 fields) and refuses documents with
+  new fields: a "mapping explosion".
+- **Ties.** Lucene returns equal scores in index order, our engine by
+  document id. The id is also indexed as a `keyword`, and the search sorts by
+  score and then by id, so both engines keep the same documents when `k`
+  cuts through a tie. That needs equal scores to *be* equal: Lucene's scores
+  are 32-bit floats, while our engine adds up 64-bit ones, whose last bits
+  depend on the order of the additions. Two scores that are equal in exact
+  arithmetic could differ there and not tie. So our engine rounds its scores
+  to 32-bit floats, like Lucene's, before it ranks them. (Rounded from slightly
+  different sums, two scores could in rare cases still land on neighbouring
+  32-bit floats.)
+
+### 4.4 Where the two engines differ, on purpose
+
+| | From scratch | Elasticsearch |
+|---|---|---|
+| Typos (`fuzzy`) | corrects each word to the one closest known word, then searches | expands each word to the indexed terms within the allowed edits and scores them all |
+| Phrase on several fields, or with a weight other than 1 | BM25F with the phrase count | the best field's score, multiplied by its weight |
+| TF-IDF | yes | no: Elasticsearch 9 has no built-in TF-IDF similarity (a `scripted` similarity could compute one) |
+| Typos of two swapped letters ("rnak") | two edits | one edit (a transposition), so short words get more fixes |
+| Fuzzy phrases | yes | not offered: phrase queries have no fuzziness, and intervals or span queries, which do, score differently |
+| "Did you mean" with a wrong first letter and one more typo ("xlastisearch") | corrects it | no suggestion: Lucene's spell checker keeps the first letter when it looks two edits away |
+| "Did you mean" between two equally close words | the one that occurs more often | the one in more documents |
+| A failed load | `add_many` keeps the documents before the bad one, and none after it | the failing bulk request still indexes its good documents, even after the bad one; a document our own check refuses stops the load before its request is sent. The index is marked unfinished and not reused |
+
+Everything else gives the same results with the same scores, to about 7
+significant digits: words in OR and AND mode, any field weights, and phrases
+on one field with weight 1. Typos are a good example of a design choice
+rather than a right answer: correcting first is what web search engines do
+("Showing results for..."); expanding is what Lucene's `FuzzyQuery` does.
+
+### 4.5 Testing code that talks to a server
+
+The engine is split the way many professional systems are: a **functional
+core** of pure functions (`es_dsl.py`) and a thin **imperative shell** that
+does the input and output (`es_engine.py`). Each layer gets its own tests:
+
+1. **Pure functions** (`tests/test_es_dsl.py`): build a request and look at
+   the dict. Fast, and no server needed.
+2. **A fake client** (`tests/fake_es.py`, used by `test_es_engine.py` and
+   `test_cli_es.py`): a small class with the methods the engine calls. It
+   records what was sent and returns canned answers, including errors such
+   as a 404 or a refused connection. This checks the shell's logic: bulk
+   chunking, reading responses, error messages.
+3. **The real thing** (`tests/test_es_integration.py`, marked `integration`):
+   the 25 sample documents go into both engines, and 40 word queries (OR and
+   AND, four weightings) must return the same documents with the same scores.
+   Without a server these tests are skipped; in CI, `REQUIRE_ES=1` turns a
+   missing server into a failure, so they can never be skipped silently.
+
+The **golden file** from chapter 2 now comes from these same settings and
+queries: `scripts/make_parity_golden.py` builds its index with
+`index_settings()` and `index_mappings()` and its queries with
+`build_query()`. Recording it again gave identical scores.
+
+In CI, the `integration` job starts Elasticsearch as a **service container**
+next to the job. It is the same image as `docker-compose.yml`, pinned by
+digest, and `tests/test_repo_config.py` fails if the two ever drift apart.
+The release workflow starts the same container, so a tag whose integration
+tests fail is never released.
+
+### Try it
+
+```bash
+docker compose up -d --wait                # Elasticsearch on localhost:9200
+pip install -e ".[es]"
+searchengine --engine es "inverted index"  # creates and fills the index once
+searchengine --engine es --category ranking "bm25"
+searchengine --engine es --explain "bm25 ranking"
+searchengine --engine es "elastisearch"     # did you mean, from the term suggester
+pytest -m integration                       # both engines side by side
+```
+
+### Interview questions you can now answer
+
+- *Why can the same document get different scores on different shards?* Each
+  shard computes N, df and avgdl from its own documents. Use one shard or
+  `dfs_query_then_fetch` when exact scores matter.
+- *`multi_match` or `combined_fields`?* `multi_match` with `best_fields` or
+  `most_fields` is field-centric: each field scores on its own.
+  `combined_fields` is term-centric and treats several fields as one (BM25F).
+  `multi_match` with `cross_fields` is term-centric too: it blends each
+  word's statistics across the fields, but still scores each field on its own
+  and keeps the best field's score for each word.
+- *`text` versus `keyword`?* `text` is analyzed into terms for full-text
+  search; `keyword` is one exact value, for filters, sorting and aggregations.
+- *Query, filter or `post_filter`?* A query scores; a filter only includes or
+  excludes, and can be cached; `post_filter` runs after the aggregations.
+- *When can a new document be found?* After a refresh makes its segment
+  searchable: Elasticsearch is "near real-time".
+- *How do you test code that calls a server?* Pure request builders, a fake
+  client for the logic, and a few integration tests against the real server.
+
+### Exercises
+
+1. Create the index with `"number_of_shards": 3` and run the integration
+   tests. Which ones fail, and why? Then search with
+   `search_type="dfs_query_then_fetch"`.
+2. Change `build_query` to use `multi_match` with `best_fields` instead of
+   `combined_fields`. Which integration tests fail, and how do the top results
+   change for "inverted index"?
+3. Add a `synonym` token filter (for example "es" and "elasticsearch") to
+   the Elasticsearch analyzer, and the same expansion to our engine. What
+   must change in both so the parity tests still pass?
+4. Move the category filter from `post_filter` into the query as a `bool`
+   `filter`. What happens to the facet counts?
+5. Run `searchengine --engine es "elastisearch"` and then with `--fuzzy`.
+   Compare the results with `--engine scratch`, and explain the differences
+   using 4.4.
+6. Make `spelling.edit_distance` count two swapped neighbouring letters as
+   one edit (the "optimal string alignment" distance), as Lucene does. Then
+   "rnak" gets the same suggestion from both engines: add an integration
+   test that shows it.
