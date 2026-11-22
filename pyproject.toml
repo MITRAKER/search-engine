@@ -120,6 +120,12 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = true
 
+[[tool.mypy.overrides]]
+# trec_eval, only for scripts/make_trec_eval_golden.py: not installed for
+# development, and it has no type hints.
+module = ["pytrec_eval"]
+ignore_missing_imports = true
+
 # -------------------------------------------------------------- pytest ----
 [tool.pytest.ini_options]
 minversion = "9.0"
@@ -133,8 +139,9 @@ markers = ["integration: needs a running Elasticsearch (set ES_URL)"]
 [tool.coverage.run]
 branch = true
 source = ["searchengine", "scripts"]
-# Records Elasticsearch's scores, so it needs a live Elasticsearch to run.
-omit = ["scripts/make_parity_golden.py"]
+# They record the golden files, so they need what they record: a live
+# Elasticsearch, and trec_eval (pytrec_eval-terrier).
+omit = ["scripts/make_parity_golden.py", "scripts/make_trec_eval_golden.py"]
 
 [tool.coverage.report]
 show_missing = true
