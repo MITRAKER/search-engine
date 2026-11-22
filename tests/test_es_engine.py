@@ -4,7 +4,13 @@ import pytest
 from elasticsearch import Elasticsearch, NotFoundError
 
 from searchengine import SearchOptions
-from searchengine.es_dsl import ANALYZER, MAX_PREFIX_LENGTH, index_mappings, index_settings
+from searchengine.es_dsl import (
+    ANALYZER,
+    MAX_PREFIX_LENGTH,
+    index_fingerprint,
+    index_mappings,
+    index_settings,
+)
 from searchengine.es_engine import (
     BULK_CHUNK_SIZE,
     MAX_ANALYZE_LENGTH,
@@ -54,7 +60,11 @@ def test_create_index_sends_our_settings_and_mappings():
     engine, fake = make_engine()
     assert engine.create_index() is True
     [create] = fake.called("indices.create")
-    assert create == {"index": "test", "settings": index_settings(), "mappings": index_mappings()}
+    # The _meta says who made the index, and that no load has finished yet.
+    meta = {"fingerprint": index_fingerprint(index_settings(), index_mappings()), "complete": False}
+    mappings = index_mappings() | {"_meta": meta}
+    assert create == {"index": "test", "settings": index_settings(), "mappings": mappings}
+    assert engine.fingerprint == meta["fingerprint"]
 
 
 def test_an_existing_index_is_kept_if_it_was_made_like_ours():
@@ -77,19 +87,43 @@ def test_an_alias_of_several_indices_is_refused():
         engine.create_index()
 
 
+def made_for(fields: list[str], k1: float = 1.2) -> dict[str, object]:
+    """The mappings of an index that an engine with these fields and k1 made."""
+    client, _ = fake_client()
+    engine = ElasticsearchEngine(client, fields=fields, k1=k1)
+    return index_mappings(fields) | {"_meta": {"fingerprint": engine.fingerprint, "complete": True}}
+
+
 @pytest.mark.parametrize(
     "mappings",
     [
-        index_mappings(["title"]),  # made for other fields: "body" is not indexed
-        {"properties": {**index_mappings()["properties"], "body": {"type": "text"}}},
-        {"properties": {k: v for k, v in index_mappings()["properties"].items() if k != "id"}},
+        made_for(["title"]),  # other fields: "body" is not indexed
+        made_for(["title", "body"], k1=2.0),  # another k1 when it was made
+        index_mappings(),  # made by hand, or by an older version: no fingerprint
+        index_mappings() | {"_meta": {"fingerprint": "0" * 64, "complete": True}},
         {},
     ],
 )
-def test_an_existing_index_with_other_mappings_is_refused(mappings):
+def test_an_existing_index_made_another_way_is_refused(mappings):
     engine, fake = make_engine(existing=True)
     fake.mappings = mappings
-    with pytest.raises(ValueError, match=r"maps '\w+' differently; recreate it"):
+    with pytest.raises(ValueError, match="not made by this engine with these settings and fields"):
+        engine.create_index()
+
+
+@pytest.mark.parametrize("meta", [{"complete": False}, {"complete": "yes"}, {}])
+def test_an_existing_index_whose_last_load_did_not_finish_is_refused(meta):
+    engine, fake = make_engine(existing=True)
+    fake.mappings["_meta"] = {"fingerprint": engine.fingerprint} | meta
+    with pytest.raises(ValueError, match="was not filled completely"):
+        engine.create_index()
+
+
+def test_an_existing_index_with_more_shards_is_refused():
+    # A split or shrunk copy of our index keeps its mappings, _meta included.
+    engine, fake = make_engine(existing=True)
+    fake.settings["index.number_of_shards"] = "3"
+    with pytest.raises(ValueError, match="has 3 shards, not 1"):
         engine.create_index()
 
 
@@ -134,6 +168,33 @@ def docs(count: int) -> list[dict[str, object]]:
     return [{"id": n, "title": f"title {n}", "body": "text", "url": "u"} for n in range(count)]
 
 
+def test_a_load_marks_the_index_unfinished_until_it_ends():
+    engine, fake = make_engine(existing=True)
+    engine.index_documents(docs(3))
+    assert [name for name, _ in fake.calls] == [
+        "indices.exists",
+        "indices.put_mapping",
+        "bulk",
+        "indices.refresh",
+        "indices.put_mapping",
+    ]
+    marks = [call["meta"] for call in fake.called("indices.put_mapping")]
+    assert marks == [
+        {"fingerprint": engine.fingerprint, "complete": False},
+        {"fingerprint": engine.fingerprint, "complete": True},
+    ]
+
+
+def test_a_failed_load_leaves_the_index_marked_unfinished():
+    engine, fake = make_engine(existing=True)
+    fake.bulk_errors = {"1": "mapper_parsing_exception"}
+    with pytest.raises(IndexingError):
+        engine.index_documents(docs(3))
+    assert fake.mappings["_meta"]["complete"] is False
+    with pytest.raises(ValueError, match="was not filled completely"):
+        engine.create_index()  # so it is not reused
+
+
 def test_documents_are_sent_in_chunks_with_create_actions():
     engine, fake = make_engine(existing=True)
     assert engine.index_documents(docs(BULK_CHUNK_SIZE * 2 + 1)) == BULK_CHUNK_SIZE * 2 + 1
@@ -171,6 +232,29 @@ def test_documents_are_checked_like_the_from_scratch_engine():
     with pytest.raises(ValueError, match="reserved"):
         engine.index_documents([{"id": "1", "spelling": "x"}])
     assert fake.called("bulk") == []
+
+
+def test_check_documents_returns_them_as_they_would_be_sent():
+    engine, fake = make_engine()
+    checked = engine.check_documents([{"id": 7, "title": "a", "url": "u"}, {"id": "8"}])
+    assert checked == [{"id": "7", "title": "a", "url": "u"}, {"id": "8"}]
+    assert fake.calls == []  # nothing is sent
+
+
+@pytest.mark.parametrize(
+    ("documents", "error", "message"),
+    [
+        ([{"id": "1"}, {"id": 1}], ValueError, "duplicate document id: 1"),
+        ([{"id": "1", "spelling": "x"}], ValueError, "reserved"),
+        ([{"id": "1", "title": 42}], TypeError, "must be a string"),
+        ([{"title": "no id"}], TypeError, "document id"),
+    ],
+)
+def test_check_documents_refuses_what_a_load_would_refuse(documents, error, message):
+    engine, fake = make_engine()
+    with pytest.raises(error, match=message):
+        engine.check_documents(documents)
+    assert fake.calls == []
 
 
 def test_rejected_documents_raise_with_the_first_reason():

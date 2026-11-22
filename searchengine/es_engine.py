@@ -32,6 +32,7 @@ from .es_dsl import (
     build_search_body,
     build_suggest_request,
     check_fields,
+    index_fingerprint,
     index_mappings,
     index_settings,
 )
@@ -102,6 +103,8 @@ class ElasticsearchEngine:
         self.index = index
         self.fields = check_fields(fields)
         self.settings = index_settings(k1, b)
+        self.mappings = index_mappings(self.fields)
+        self.fingerprint = index_fingerprint(self.settings, self.mappings)
         self.k1, self.b = k1, b
         self.client = client if client is not None else Elasticsearch(default_url())
 
@@ -110,8 +113,9 @@ class ElasticsearchEngine:
     def create_index(self, *, recreate: bool = False) -> bool:
         """Create the index. Returns False if it already existed and was kept.
 
-        An existing index is kept only if it was made like this engine would
-        make it: with the same k1 and b, and our analyzer on every field.
+        An existing index is kept only if this engine made it, with the same
+        settings and fields (its fingerprint says so), it still has one shard
+        and the same k1 and b, and the last load into it finished.
         """
         if not isinstance(recreate, bool):
             raise TypeError("recreate must be True or False")
@@ -121,10 +125,18 @@ class ElasticsearchEngine:
             return False
         if exists:
             self.client.indices.delete(index=self.index)
-        self.client.indices.create(
-            index=self.index, settings=self.settings, mappings=index_mappings(self.fields)
-        )
+        # Empty until a load finishes: if this run stops now, the next one
+        # sees an unfinished index, and refuses it instead of searching it.
+        mappings = self.mappings | {"_meta": self._meta(complete=False)}
+        self.client.indices.create(index=self.index, settings=self.settings, mappings=mappings)
         return True
+
+    def _meta(self, *, complete: bool) -> dict[str, Any]:
+        """What the index records about itself, in its mapping's ``_meta``."""
+        return {"fingerprint": self.fingerprint, "complete": complete}
+
+    def _mark(self, *, complete: bool) -> None:
+        self.client.indices.put_mapping(index=self.index, meta=self._meta(complete=complete))
 
     def _only(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
         """The entry of a per-index answer. The name may be an alias of several indices."""
@@ -134,23 +146,31 @@ class ElasticsearchEngine:
         return dict(entries[0])
 
     def _check_index(self) -> None:
-        """An index made with other settings or fields would score differently."""
+        """An index made in any other way would score differently, or miss documents."""
         response = self.client.indices.get_settings(index=self.index, flat_settings=True)
         settings = self._only(response.body)["settings"]
+        # k1 and b can be changed on a closed index, so check what they are now.
         prefix = "index.similarity.default."
         found = (settings.get(prefix + "k1"), settings.get(prefix + "b"))
         if None in found or (float(found[0]), float(found[1])) != (self.k1, self.b):
             raise ValueError(
                 f"index {self.index!r} has k1, b = {found}, not {(self.k1, self.b)}; recreate it"
             )
+        shards = settings.get("index.number_of_shards")
+        if shards != "1":  # a split or shrunk copy keeps the _meta, not the shard count
+            raise ValueError(f"index {self.index!r} has {shards} shards, not 1; recreate it")
         mappings = self._only(self.client.indices.get_mapping(index=self.index).body)
-        properties = mappings["mappings"].get("properties", {})
-        ours = {name: {"type": "text", "analyzer": ANALYZER} for name in self.fields}
-        ours["id"] = {"type": "keyword"}
-        for name, expected in ours.items():
-            mapped = properties.get(name, {})
-            if any(mapped.get(key) != value for key, value in expected.items()):
-                raise ValueError(f"index {self.index!r} maps {name!r} differently; recreate it")
+        meta = mappings["mappings"].get("_meta", {})
+        if meta.get("fingerprint") != self.fingerprint:
+            raise ValueError(
+                f"index {self.index!r} was not made by this engine with these settings "
+                "and fields; recreate it"
+            )
+        if meta.get("complete") is not True:
+            raise ValueError(
+                f"index {self.index!r} was not filled completely (a load failed or was "
+                "stopped); recreate it"
+            )
 
     def delete_index(self) -> None:
         """Delete the index, if it exists."""
@@ -162,21 +182,26 @@ class ElasticsearchEngine:
         The index must exist (``create_index``): otherwise Elasticsearch would
         make one with its default analyzer. Each document is checked like
         ``InvertedIndex.add``. A bulk request holds an action line and a source
-        line per document, for at most BULK_CHUNK_SIZE documents and about
-        BULK_CHUNK_BYTES bytes. We use the ``create`` action, not ``index``, so
-        a duplicate id is an error instead of a silent overwrite. As with
-        ``InvertedIndex.add_many``, documents added before a failure stay.
+        line per document. A new request starts every BULK_CHUNK_SIZE
+        documents, or sooner, once one holds BULK_CHUNK_BYTES of documents. We
+        use the ``create`` action, not ``index``, so a duplicate id is an error
+        instead of a silent overwrite.
+
+        A load is not atomic. When one fails, Elasticsearch keeps the requests
+        sent before, and every good document of the failing request, even
+        those after the bad one; a document our own check refuses stops the
+        load before its request is sent. So the index is marked unfinished
+        while a load runs, and ``create_index`` will not reuse it until a load
+        finishes.
         """
         if not self.client.indices.exists(index=self.index):
             raise ValueError(f"index {self.index!r} does not exist: create it first")
+        self._mark(complete=False)
         added, size = 0, 0
         operations: list[dict[str, Any]] = []
         for doc in docs:
-            source = normalize_document(doc)  # keeps "id": the index sorts ties by it
-            doc_id = source["id"]
-            if SPELLING_FIELD in source:
-                raise ValueError(f"document {doc_id}: field {SPELLING_FIELD!r} is reserved")
-            operations += [{"create": {"_index": self.index, "_id": doc_id}}, source]
+            source = self._source(doc)
+            operations += [{"create": {"_index": self.index, "_id": source["id"]}}, source]
             size += len(json.dumps(source, ensure_ascii=False).encode("utf-8"))
             if len(operations) == 2 * BULK_CHUNK_SIZE or size >= BULK_CHUNK_BYTES:
                 added += self._bulk(operations)
@@ -184,7 +209,31 @@ class ElasticsearchEngine:
         if operations:
             added += self._bulk(operations)
         self.client.indices.refresh(index=self.index)
+        self._mark(complete=True)
         return added
+
+    def check_documents(self, docs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Check documents as ``index_documents`` would, and that no id repeats.
+
+        Nothing is sent. Returns the documents as they would be indexed, so a
+        caller can check a whole file before it deletes an index.
+        """
+        checked: list[dict[str, Any]] = []
+        ids: set[str] = set()
+        for doc in docs:
+            source = self._source(doc)
+            if source["id"] in ids:
+                raise ValueError(f"duplicate document id: {source['id']}")
+            ids.add(source["id"])
+            checked.append(source)
+        return checked
+
+    def _source(self, doc: Mapping[str, Any]) -> dict[str, Any]:
+        """A document as it is sent, checked like ``InvertedIndex.add``."""
+        source = normalize_document(doc)  # keeps "id": the index sorts ties by it
+        if SPELLING_FIELD in source:
+            raise ValueError(f"document {source['id']}: field {SPELLING_FIELD!r} is reserved")
+        return source
 
     def _bulk(self, operations: list[dict[str, Any]]) -> int:
         response = self.client.bulk(operations=operations).body

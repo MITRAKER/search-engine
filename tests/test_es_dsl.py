@@ -32,6 +32,7 @@ from searchengine.es_dsl import (
     build_suggest_request,
     check_fields,
     explanation_lines,
+    index_fingerprint,
     index_mappings,
     index_settings,
 )
@@ -327,3 +328,28 @@ def test_explanations_stop_at_the_depth_limit():
 def test_explanations_are_capped():
     wide = node(1, "root", *[node(0, f"child {i}") for i in range(2 * MAX_EXPLAIN_LINES)])
     assert len(explanation_lines(wide)) == MAX_EXPLAIN_LINES
+
+
+# ---------- the fingerprint ----------
+
+
+def test_the_fingerprint_is_a_sha256_of_settings_and_mappings_in_any_key_order():
+    fingerprint = index_fingerprint(index_settings(), index_mappings())
+    assert len(fingerprint) == 64
+    assert int(fingerprint, 16) >= 0  # hexadecimal
+    reordered = dict(reversed(list(index_settings().items())))
+    assert index_fingerprint(reordered, index_mappings()) == fingerprint
+
+
+def test_the_fingerprint_changes_with_any_setting_or_mapping():
+    fingerprint = index_fingerprint(index_settings(), index_mappings())
+    other_analyzer = index_settings()
+    other_analyzer["analysis"]["analyzer"][ANALYZER]["tokenizer"] = "standard"
+    others = [
+        (index_settings(k1=2.0), index_mappings()),
+        (index_settings(b=0.5), index_mappings()),
+        (other_analyzer, index_mappings()),
+        (index_settings() | {"number_of_shards": 3}, index_mappings()),
+        (index_settings(), index_mappings(["title"])),
+    ]
+    assert all(index_fingerprint(*other) != fingerprint for other in others)

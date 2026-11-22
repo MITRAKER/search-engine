@@ -7,6 +7,7 @@ from elastic_transport import ConnectionError as TransportConnectionError
 from elastic_transport import ConnectionTimeout
 
 from searchengine.cli import main
+from searchengine.datasets import SAMPLE
 from tests.fake_es import fake_client, not_found, search_response
 
 HIT = {
@@ -105,6 +106,35 @@ def test_reindex_reads_the_data_before_deleting_the_index(capsys, tmp_path):
     bad.write_text('{"id": "1", "title": "ok"}\nnot json\n', encoding="utf-8")
     assert main(["--engine", "es", "--reindex", "--data", str(bad), "x"], es_client=client) == 1
     assert fake.called("indices.delete") == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '{"id": "26", "title": "late typo", "body": 7}',
+        '{"id": "1", "title": "the id of the first document again"}',
+        '{"title": "no id"}',
+        '{"id": "27", "spelling": "a reserved field"}',
+    ],
+)
+def test_reindex_checks_every_document_before_deleting_the_index(capsys, tmp_path, bad):
+    client, fake = fake_client(existing=True)
+    data = tmp_path / "data.jsonl"
+    data.write_text(SAMPLE.read_text("utf-8") + bad + "\n", encoding="utf-8")
+    assert main(["--engine", "es", "--reindex", "--data", str(data), "x"], es_client=client) == 1
+    assert capsys.readouterr().err.startswith("searchengine: error: ")
+    assert fake.called("indices.delete") == []
+    assert fake.called("bulk") == []
+
+
+def test_an_unfinished_index_is_refused_until_it_is_recreated(capsys):
+    client, fake = fake_client(existing=True)
+    fake.mappings["_meta"]["complete"] = False  # a run was stopped while loading
+    assert main(["--engine", "es", "x"], es_client=client) == 1
+    assert "was not filled completely" in capsys.readouterr().err
+    fake.search_responses = [search_response(), {"suggest": {}}]
+    assert main(["--engine", "es", "--reindex", "x"], es_client=client) == 0
+    assert fake.mappings["_meta"]["complete"] is True
 
 
 def test_ctrl_c_during_the_fill_deletes_the_half_built_index(monkeypatch):

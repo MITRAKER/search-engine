@@ -214,8 +214,43 @@ def test_count_and_existing_index(engines, client):
 def test_an_index_made_for_other_fields_is_refused(engines, client):
     _, es = engines
     other = ElasticsearchEngine(client, index=es.index, fields=["title", "body", "abstract"])
-    with pytest.raises(ValueError, match="maps 'abstract' differently"):
+    with pytest.raises(ValueError, match="not made by this engine with these settings and fields"):
         other.create_index()
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"number_of_shards": 3}, "has 3 shards, not 1"),  # other statistics on each shard
+        ({}, "not made by this engine"),  # our settings and mappings, made by hand: no _meta
+    ],
+)
+def test_an_index_made_by_hand_is_refused(client, changes, message):
+    engine = ElasticsearchEngine(client, index=f"test-by-hand-{os.getpid()}")
+    engine.delete_index()
+    settings = engine.settings | changes
+    client.indices.create(index=engine.index, settings=settings, mappings=engine.mappings)
+    try:
+        with pytest.raises(ValueError, match=message):
+            engine.create_index()
+    finally:
+        engine.delete_index()
+
+
+def test_an_index_whose_load_stopped_is_refused_until_recreated(scratch_index):
+    def stopped() -> Iterator[dict[str, str]]:
+        yield {"id": "1", "body": "loaded before the stop"}
+        raise KeyboardInterrupt  # as if someone pressed Ctrl-C while loading
+
+    with pytest.raises(KeyboardInterrupt):
+        scratch_index.index_documents(stopped())
+    again = ElasticsearchEngine(scratch_index.client, index=scratch_index.index)
+    with pytest.raises(ValueError, match="was not filled completely"):
+        again.create_index()
+    assert again.create_index(recreate=True) is True
+    again.index_documents([{"id": "1", "body": "loaded again"}])
+    reused = ElasticsearchEngine(scratch_index.client, index=scratch_index.index)
+    assert reused.create_index() is False
 
 
 def test_scores_equal_in_exact_arithmetic_tie_in_both_engines(scratch_index):

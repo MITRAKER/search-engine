@@ -12,7 +12,7 @@ from typing import Any, cast
 from elastic_transport import ApiResponseMeta, HttpHeaders, NodeConfig
 from elasticsearch import Elasticsearch, NotFoundError
 
-from searchengine.es_dsl import index_mappings
+from searchengine.es_dsl import index_fingerprint, index_mappings, index_settings
 
 
 @dataclass
@@ -60,6 +60,12 @@ class FakeIndices:
     def create(self, **kwargs: Any) -> Response:
         self.es.record("indices.create", kwargs)
         self.es.existing = True
+        self.es.mappings = kwargs["mappings"]
+        return Response({"acknowledged": True})
+
+    def put_mapping(self, **kwargs: Any) -> Response:
+        self.es.record("indices.put_mapping", kwargs)
+        self.es.mappings = self.es.mappings | {"_meta": kwargs["meta"]}
         return Response({"acknowledged": True})
 
     def delete(self, **kwargs: Any) -> Response:
@@ -99,8 +105,13 @@ class FakeElasticsearch:
         self.settings: dict[str, str] = {
             "index.similarity.default.k1": "1.2",
             "index.similarity.default.b": "0.75",
+            "index.number_of_shards": "1",
         }
-        self.mappings: dict[str, Any] = index_mappings()
+        # As an engine with the default settings made it, and filled it.
+        fingerprint = index_fingerprint(index_settings(), index_mappings())
+        self.mappings: dict[str, Any] = index_mappings() | {
+            "_meta": {"fingerprint": fingerprint, "complete": True}
+        }
         self.concrete: list[str] = []  # the indices an alias names; empty: not an alias
         self.bulk_errors: dict[str, str] = {}  # document id -> error reason
         self.search_responses: list[dict[str, Any]] = []

@@ -18,6 +18,8 @@ The index is set up so Elasticsearch scores like ``InvertedIndex``:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
@@ -130,6 +132,18 @@ def index_settings(k1: float = DEFAULT_K1, b: float = DEFAULT_B) -> dict[str, An
         "similarity": {"default": {"type": "BM25", "k1": k1, "b": b}},
         "analysis": analysis_settings(),
     }
+
+
+def index_fingerprint(settings: Mapping[str, Any], mappings: Mapping[str, Any]) -> str:
+    """A hash of the settings and mappings an index is made with.
+
+    The engine stores it in the index (in the mapping's ``_meta``) and reuses
+    an index only if it finds its own fingerprint there. So an index made
+    with another analyzer, other fields, other BM25 parameters or more
+    shards, by hand or by another version of this code, is never reused.
+    """
+    data = json.dumps([settings, mappings], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(data.encode("ascii")).hexdigest()
 
 
 # ---------- queries ----------

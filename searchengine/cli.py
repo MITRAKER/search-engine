@@ -122,10 +122,10 @@ def _run_elasticsearch(
     index = es_engine.DEFAULT_INDEX if args.index is None else args.index
     engine = es_engine.ElasticsearchEngine(client, index=index)
     try:
-        # Check the query, and with --reindex read the whole file, before the
-        # index is touched: a typo must not cost the index that is there.
+        # Check the query, and with --reindex every document, before the index
+        # is touched: a typo must not cost the index that is there.
         engine.search_body(args.query, k=args.k, options=options, category=args.category)
-        documents = list(load_jsonl(args.data)) if args.reindex else None
+        documents = engine.check_documents(load_jsonl(args.data)) if args.reindex else None
         if engine.create_index(recreate=args.reindex):
             _fill(engine, load_jsonl(args.data) if documents is None else documents)
         _print_es_results(engine, args, options)
